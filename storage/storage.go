@@ -2,7 +2,6 @@ package storage
 
 import (
 	"sync"
-
 	"github.com/ela-lab/razpravljalnica/razpravljalnica"
 )
 
@@ -148,5 +147,20 @@ func (ms *MessageStorage) UpdateMessage(message razpravljalnica.Message, ret *st
 }
 
 //SUBSCRIPTIONS
+func (ss *SubscriptionStorage) CreateSubscription(userId, topicId int64, ret *struct{}) error {
+	ss.lock.Lock()
+	defer ss.lock.Unlock()
+	if topics, ok := ss.dict[userId]; ok {
+		for _, j := range topics {
+			if j == topicId {
+				return nil
+			}
+		}
+		ss.dict[userId] = append(ss.dict[userId], topicId)
+	} else {
+		ss.dict[userId] = []int64{}
+	}
+	return nil
+}
 
 //TOPICS
