@@ -2,6 +2,7 @@ package storage
 
 import (
 	"sync"
+
 	"github.com/ela-lab/razpravljalnica/razpravljalnica"
 )
 
@@ -16,23 +17,22 @@ type TopicStorage struct {
 }
 
 type SubscriptionStorage struct {
-	dict map[int64][]int64 // user_id -> seznam topic_id
+	dict map[int64][]int64 //user_id -> seznam topic_id
     lock sync.RWMutex
 }
 
 type MessageStorage struct {
-	dict map[int64]razpravljalnica.Message
+	dict map[int64][]razpravljalnica.Message //topic_id -> seznam message
 	lock sync.RWMutex
 }
 
 type LikeStorage struct {
-	dict map[int64][]int64 // message_id -> seznam user_id
+	dict map[int64][]int64 //message_id -> seznam user_id
 	lock sync.RWMutex
 }
 
 /*
 TO DO:
-MESSAGE - Create, Update, Delete, Read(sporočila v temi)
 SUBSCRIPTION - Create
 TOPIC - Create, Read(vse teme)
 */
@@ -74,10 +74,10 @@ func (ls *LikeStorage) CreateLike(like razpravljalnica.Like, ret *struct{}) erro
 }
 
 //št. like-ov na message
-func (ls *LikeStorage) ReadAllLikes(messageId int64, likes *int64) error {
+func (ls *LikeStorage) ReadLikes(messageId int64, likes *int64) error {
 	ls.lock.RLock()
 	defer ls.lock.RUnlock()
-	users, ok := ls.dict[messageId];
+	users, ok := ls.dict[messageId]
 	if ok {
 		*likes = int64(len(users))
 	} else {
@@ -87,4 +87,65 @@ func (ls *LikeStorage) ReadAllLikes(messageId int64, likes *int64) error {
 }
 
 //MESSAGES
+func (ms *MessageStorage) CreateMessage(message razpravljalnica.Message, ret *struct{}) error {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+	//če še message v topic ne obstaja
+	if _, ok := ms.dict[message.TopicId]; !ok {
+        ms.dict[message.TopicId] = []razpravljalnica.Message{}
+    }
+    ms.dict[message.TopicId] = append(ms.dict[message.TopicId], message)
+    return nil
+}
 
+func(ms *MessageStorage) DeleteMessage(messageId, topicId int64, ret *struct{}) error {
+	ms.lock.Lock()
+	msgs, ok := ms.dict[topicId]
+    if !ok {
+        return nil //tema ne obstaja
+    }
+
+	//nov slice za filtriranje sporočil
+    newMsgs := []razpravljalnica.Message{}
+    for _, m := range msgs {
+        if m.Id != messageId {
+            newMsgs = append(newMsgs, m)
+        }
+    }
+
+    ms.dict[topicId] = newMsgs
+    return nil
+}
+
+func (ms *MessageStorage) ReadMessages(topicId int64, dict *[]razpravljalnica.Message) error {
+	ms.lock.RLock()
+    defer ms.lock.RUnlock()
+
+    msgs, ok := ms.dict[topicId]
+    if !ok {
+		*dict = []razpravljalnica.Message{}
+		return nil
+    }
+
+    *dict = make([]razpravljalnica.Message, len(msgs))
+    copy(*dict, msgs)
+
+    return nil
+}
+
+func (ms *MessageStorage) UpdateMessage(message razpravljalnica.Message, ret *struct{}) error {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+	if msgs,ok := ms.dict[message.TopicId]; ok {
+		for i, j := range msgs {
+			if j.Id == message.Id
+			ms.dict[message.TopicId][i] = message
+			return nil
+		}
+	}
+	return nil
+}
+
+//SUBSCRIPTIONS
+
+//TOPICS
