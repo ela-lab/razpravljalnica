@@ -2,6 +2,7 @@ package storage
 
 import (
 	"sync"
+
 	"github.com/ela-lab/razpravljalnica/razpravljalnica"
 )
 
@@ -11,7 +12,7 @@ type UserStorage struct {
 }
 
 type TopicStorage struct {
-	dict map[int64]razpravljalnica.Topic
+	dict map[int64]razpravljalnica.Topic //topic_id -> topic
 	lock sync.RWMutex
 }
 
@@ -29,12 +30,6 @@ type LikeStorage struct {
 	dict map[int64][]int64 //message_id -> seznam user_id
 	lock sync.RWMutex
 }
-
-/*
-TO DO:
-SUBSCRIPTION - Create
-TOPIC - Create, Read(vse teme)
-*/
 
 // USERS
 func (us *UserStorage) CreateUser(user razpravljalnica.User, ret *struct{}) error {
@@ -158,9 +153,25 @@ func (ss *SubscriptionStorage) CreateSubscription(userId, topicId int64, ret *st
 		}
 		ss.dict[userId] = append(ss.dict[userId], topicId)
 	} else {
-		ss.dict[userId] = []int64{}
+		ss.dict[userId] = []int64{topicId}
 	}
 	return nil
 }
 
 //TOPICS
+func (ts *TopicStorage) CreateTopic(topic razpravljalnica.Topic, ret *struct{}) error {
+	ts.lock.Lock()
+	defer ts.lock.Unlock()
+	ts.dict[topic.Id] = topic
+	return nil
+}
+
+func (ts *TopicStorage) ReadTopics(topics *[]razpravljalnica.Topic) error {
+	ts.lock.RLock()
+	defer ts.lock.RUnlock()
+	*topics = []razpravljalnica.Topic{}
+	for _, val := range ts.dict {
+		*topics = append(*topics, val)
+	}
+	return nil
+}
