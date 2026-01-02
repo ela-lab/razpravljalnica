@@ -2,7 +2,6 @@ package storage
 
 import (
 	"sync"
-
 	"github.com/ela-lab/razpravljalnica/razpravljalnica"
 )
 
