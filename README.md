@@ -12,81 +12,89 @@ Razpravljalnica is a discussion board that allows users to:
 - Edit and delete their own messages
 - Subscribe to topics and receive real-time message updates
 
-## Architecture
+## Project Structure
 
-The implementation currently consists of:
-- **Single gRPC server** with in-memory storage
-- **MessageBoard service** implementing all required operations
-- **Storage layer** with thread-safe in-memory data structures
-- **Subscription system** for real-time event streaming
-
-## Building
-
-```bash
-cd grpc
-go build -o ../razpravljalnica-server .
+```
+razpravljalnica/
+├── api/                    # Protobuf definitions and generated code
+├── internal/
+│   ├── storage/           # Thread-safe in-memory storage
+│   └── client/            # Reusable gRPC client service
+├── cmd/
+│   ├── server/            # Server executable
+│   ├── cli/               # Command-line interface client
+│   └── tui/               # Terminal UI client (tview)
+├── tests/                  # Integration tests
+├── Makefile               # Build automation
+└── bin/                   # Compiled binaries (generated)
 ```
 
-## Running the Server
+## Quick Start
+
+### Building
 
 ```bash
-./razpravljalnica-server -p 9876
+# Build all binaries
+make build
+
+# Build specific components
+make build-server
+make build-cli
+make build-tui
 ```
 
-The server will start listening on port 9876 (default).
-
-## Running the Client
+### Running the Server
 
 ```bash
-./razpravljalnica-server -s localhost -p 9876
+./bin/razpravljalnica-server -p 9876
+```
+
+Or with make:
+```bash
+make dev-server
+```
+
+### Running Clients
+
+**CLI Client:**
+```bash
+# Show help
+./bin/razpravljalnica-cli -s localhost -p 9876 help
+
+# Register a user
+./bin/razpravljalnica-cli -s localhost -p 9876 register --name "Alice"
+
+# Create a topic
+./bin/razpravljalnica-cli -s localhost -p 9876 create-topic --title "General Discussion"
+
+# Post a message
+./bin/razpravljalnica-cli -s localhost -p 9876 post-message --userId 1 --topicId 1 --message "Hello!"
+
+# List topics
+./bin/razpravljalnica-cli -s localhost -p 9876 list-topics
+
+# Subscribe to topics (real-time)
+./bin/razpravljalnica-cli -s localhost -p 9876 subscribe --userId 1 --topicIds 1
+```
+
+**TUI Client (Terminal UI):**
+```bash
+./bin/razpravljalnica-tui -s localhost -p 9876
+```
+
+## Testing
+
+```bash
+make test                # Run all tests
+make test-verbose        # Run with race detector
+make test-coverage       # Generate coverage report
 ```
 
 ## Implementation Details
 
-### Storage
-
-The storage layer uses thread-safe in-memory data structures:
-- `UserStorage`: Stores user information
-- `TopicStorage`: Stores discussion topics
-- `MessageStorage`: Stores messages organized by topic
-- `LikeStorage`: Tracks likes on messages
-- `SubscriptionStorage`: Manages user topic subscriptions
-
-All storage operations are protected by RWMutex locks for concurrent access.
-
-### Server Operations
-
-**User Management:**
-- `CreateUser`: Register a new user with auto-generated ID
-
-**Topic Management:**
-- `CreateTopic`: Create a new discussion topic
-- `ListTopics`: List all available topics
-
-**Message Operations:**
-- `PostMessage`: Post a message to a topic (requires valid user and topic)
-- `UpdateMessage`: Edit message text (only by original author)
-- `DeleteMessage`: Remove a message (only by original author)
-- `GetMessages`: Retrieve messages from a topic with optional filtering
-- `LikeMessage`: Add a like to a message
-
-**Subscriptions:**
-- `GetSubscriptionNode`: Request a subscription token
-- `SubscribeTopic`: Stream real-time message events for subscribed topics
-
-### Event Broadcasting
-
-When messages are posted, updated, deleted, or liked, the server broadcasts events to all subscribed clients. Events include:
-- Sequence number (monotonically increasing)
-- Operation type (POST, UPDATE, DELETE, LIKE)
-- Message data
-- Timestamp
-
-## Features
-
 ✅ Multi-user concurrent access  
 ✅ Thread-safe in-memory storage  
 ✅ Real-time subscriptions with streaming  
-✅ Message ownership verification  
-✅ Like tracking  
-✅ Historical message replay for new subscribers  
+✅ Multiple client interfaces (CLI, TUI)
+✅ Comprehensive unit tests
+✅ Clean modular architecture
