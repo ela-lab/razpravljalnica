@@ -46,6 +46,9 @@ type MessageBoardServer struct {
 	nodeID  string
 	address string
 	nextNodeID string
+	nextAddress string
+	nextReplica api.ReplicationServiceClient
+
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -55,7 +58,7 @@ type SubscriptionInfo struct {
 }
 
 // NewMessageBoardServer creates a new server instance
-func NewMessageBoardServer(nodeID, address string, nextNodeID string) *MessageBoardServer {
+func NewMessageBoardServer(nodeID, address string, nextNodeID string, nextAddress string) *MessageBoardServer {
 	return &MessageBoardServer{
 		userStorage:         *storage.NewUserStorage(),
 		topicStorage:        *storage.NewTopicStorage(),
@@ -67,6 +70,7 @@ func NewMessageBoardServer(nodeID, address string, nextNodeID string) *MessageBo
 		nodeID:              nodeID,
 		address:             address,
 		nextNodeID:			 nextNodeID,
+		nextAddress: 		 nextAddress,	
 	}
 }
 
@@ -574,19 +578,84 @@ func generateToken() string {
 	return hex.EncodeToString(b)
 }
 
+func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.ReplicationRequest,) (*api.ReplicationResponse, error) {
+
+	var ret struct{}
+
+	if req.User != nil {
+		if err := s.userStorage.CreateUser(req.User, &ret); err != nil {
+			return nil, status.Errorf(codes.Internal, "replicate create user failed: %v", err)
+		}
+	} else if req.Topic != nil {
+		if err := s.topicStorage.CreateTopic(req.Topic, &ret); err != nil {
+			return nil, status.Errorf(codes.Internal, "replicate create topic failed: %v", err)
+		}
+	} else {
+		switch req.Op {
+
+		case api.OpType_OP_POST:
+			if err := s.messageStorage.CreateMessage(req.Message, &ret); err != nil {
+				return nil, status.Errorf(codes.Internal, "replicate post failed: %v", err)
+			}
+
+		case api.OpType_OP_UPDATE:
+			if err := s.messageStorage.UpdateMessage(req.Message, &ret); err != nil {
+				return nil, status.Errorf(codes.Internal, "replicate update failed: %v", err)
+			}
+
+		case api.OpType_OP_DELETE:
+			if err := s.messageStorage.DeleteMessage(
+				req.Message.Id,
+				req.Message.TopicId,
+				&ret,); err != nil {
+				return nil, status.Errorf(codes.Internal, "replicate delete failed: %v", err)
+			}
+
+		case api.OpType_OP_LIKE:
+			var liked bool
+			if err := s.likeStorage.ToggleLike(&api.Like{
+				TopicId:   req.Message.TopicId,
+				MessageId: req.Message.Id,
+				UserId:    req.Message.UserId,}, &liked); err != nil {
+				return nil, status.Errorf(codes.Internal, "replicate like failed: %v", err)
+			}
+		}
+	}
+
+	atomic.StoreInt64(&s.sequenceCounter, req.SequenceNumber)
+
+	if s.nextNodeID != "tail" {
+		_, err := s.nextReplica.ReplicateOperation(ctx, req)
+        if err != nil {
+            return nil, err
+        }
+	}
+
+	return &api.ReplicationResponse{AckSequenceNumber: req.SequenceNumber,}, nil
+}
+
+
 // StartServer starts the gRPC server
-func StartServer(id string, url string, nextNodeId string) {
+func StartServer(id string, url string, nextNodeId string, nextAddress string) {
 	lis, err := net.Listen("tcp", url)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
 	grpcServer := grpc.NewServer()
-	server := NewMessageBoardServer(id, url, nextNodeId)
+	server := NewMessageBoardServer(id, url, nextNodeId, nextAddress)
 
 	api.RegisterMessageBoardServer(grpcServer, server)
 
 	log.Printf("Server listening on %s", url)
+
+	if nextAddress != "" {
+		conn, err := grpc.NewClient(nextAddress)
+		if err != nil {
+			log.Fatalf("failed to connect to next node: %v", err)
+		}
+		server.nextReplica = api.NewReplicationServiceClient(conn)
+	}
 
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
