@@ -45,6 +45,7 @@ type MessageBoardServer struct {
 	// Node info
 	nodeID  string
 	address string
+	nextNodeID string
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -54,7 +55,7 @@ type SubscriptionInfo struct {
 }
 
 // NewMessageBoardServer creates a new server instance
-func NewMessageBoardServer(nodeID, address string) *MessageBoardServer {
+func NewMessageBoardServer(nodeID, address string, nextNodeID string) *MessageBoardServer {
 	return &MessageBoardServer{
 		userStorage:         *storage.NewUserStorage(),
 		topicStorage:        *storage.NewTopicStorage(),
@@ -65,11 +66,15 @@ func NewMessageBoardServer(nodeID, address string) *MessageBoardServer {
 		subscriptionTokens:  make(map[string]*SubscriptionInfo),
 		nodeID:              nodeID,
 		address:             address,
+		nextNodeID:			 nextNodeID,
 	}
 }
 
 // CreateUser creates a new user
 func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUserRequest) (*api.User, error) {
+	if s.nodeID != "head" {
+        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+    }
 	userID := atomic.AddInt64(&s.userIDCounter, 1)
 
 	user := &api.User{
@@ -91,6 +96,9 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUser
 
 // GetUser returns user info by id
 func (s *MessageBoardServer) GetUser(ctx context.Context, req *api.GetUserRequest) (*api.User, error) {
+	if s.nodeID != "tail" {
+        return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+    }
 	var name string
 	if err := s.userStorage.ReadUser(req.UserId, &name); err != nil || name == "" {
 		return nil, status.Errorf(codes.NotFound, "user not found: %d", req.UserId)
@@ -101,6 +109,9 @@ func (s *MessageBoardServer) GetUser(ctx context.Context, req *api.GetUserReques
 
 // CreateTopic creates a new topic
 func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTopicRequest) (*api.Topic, error) {
+	if s.nodeID != "head" {
+        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+    }
 	topicID := atomic.AddInt64(&s.topicIDCounter, 1)
 
 	topic := &api.Topic{
@@ -119,6 +130,9 @@ func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTop
 
 // PostMessage posts a new message to a topic
 func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessageRequest) (*api.Message, error) {
+	if s.nodeID != "head" {
+        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+    }
 	// Verify user exists
 	var userName string
 	if err := s.userStorage.ReadUser(req.UserId, &userName); err != nil || userName == "" {
@@ -176,6 +190,9 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessa
 
 // UpdateMessage updates an existing message
 func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateMessageRequest) (*api.Message, error) {
+	if s.nodeID != "head" {
+        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+    }
 	// Get existing messages for the topic
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
@@ -228,6 +245,9 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateM
 
 // DeleteMessage deletes an existing message
 func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteMessageRequest) (*emptypb.Empty, error) {
+	if s.nodeID != "head" {
+        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+    }
 	// Get existing messages for the topic
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
@@ -271,6 +291,9 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteM
 
 // LikeMessage adds a like to a message
 func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessageRequest) (*api.Message, error) {
+	if s.nodeID != "head" {
+        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+    }
 	// Get existing messages for the topic
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
@@ -358,6 +381,9 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 
 // ListTopics returns all topics
 func (s *MessageBoardServer) ListTopics(ctx context.Context, req *emptypb.Empty) (*api.ListTopicsResponse, error) {
+	if s.nodeID != "tail" {
+        return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+    }
 	var topics []*api.Topic
 	if err := s.topicStorage.ReadTopics(&topics); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read topics: %v", err)
@@ -370,6 +396,9 @@ func (s *MessageBoardServer) ListTopics(ctx context.Context, req *emptypb.Empty)
 
 // ListSubscriptions returns subscriptions for a user
 func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.ListSubscriptionsRequest) (*api.ListSubscriptionsResponse, error) {
+	if s.nodeID != "tail" {
+        return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+    }
 	resp := &api.ListSubscriptionsResponse{}
 	resp.TopicId = make([]int64, 0)
 	if req == nil {
@@ -386,6 +415,9 @@ func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.Lis
 
 // GetMessages returns messages from a topic
 func (s *MessageBoardServer) GetMessages(ctx context.Context, req *api.GetMessagesRequest) (*api.GetMessagesResponse, error) {
+	if s.nodeID != "tail" {
+        return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+    }
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read messages: %v", err)
@@ -543,14 +575,14 @@ func generateToken() string {
 }
 
 // StartServer starts the gRPC server
-func StartServer(url string) {
+func StartServer(id string, url string, nextNodeId string) {
 	lis, err := net.Listen("tcp", url)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
 	grpcServer := grpc.NewServer()
-	server := NewMessageBoardServer("server-1", url)
+	server := NewMessageBoardServer(id, url, nextNodeId)
 
 	api.RegisterMessageBoardServer(grpcServer, server)
 
