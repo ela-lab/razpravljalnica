@@ -94,6 +94,10 @@ service  MessageBoard{
   
 }
 
+service ReplicationService {
+  rpc ReplicateOperation(ReplicationRequest) returns (ReplicationResponse);
+}
+
 message CreateUserRequest {
   string name = 1;
 }
@@ -174,6 +178,18 @@ message MessageEvent {
   OpType op = 2; // type of event
   Message message = 3;
   google.protobuf.Timestamp event_at = 4; // timestamp of the event
+}
+
+message ReplicationRequest {
+  int64 sequence_number = 1; 
+  OpType op = 2;             
+  User user = 3;             // if CreateUser
+  Topic topic = 4;           // if CreateTopic
+  Message message = 5;       // if Post/Update/Delete/LikeMessage
+}
+
+message ReplicationResponse {
+  int64 ack_sequence_number = 1; // potrjeni seqID
 }
 
 ////////////////////////////////////////////////////////////////////////////////
