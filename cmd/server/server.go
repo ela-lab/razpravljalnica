@@ -107,6 +107,8 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUser
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "replication failed: %v", err)
 		}
+		now := time.Now().Format("15:04:05.000")
+    	log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
 
 		if resp.AckSequenceNumber != seq {
 			return nil, status.Errorf(codes.Internal, "replication out of order")
@@ -699,11 +701,13 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 		if err := s.userStorage.CreateUser(req.User, &ret); err != nil {
 			return nil, status.Errorf(codes.Internal, "replicate create user failed: %v", err)
 		}
+		now = time.Now().Format("15:04:05.000")
 		log.Printf("[%s] [Node %s] Replicated CreateUser: %d", now, s.nodeID, req.User.Id)
 	} else if req.Topic != nil {
 		if err := s.topicStorage.CreateTopic(req.Topic, &ret); err != nil {
 			return nil, status.Errorf(codes.Internal, "replicate create topic failed: %v", err)
 		}
+		now := time.Now().Format("15:04:05.000")
 		log.Printf("[%s] [Node %s] Replicated CreateTopic: %d", now, s.nodeID, req.Topic.Id)
 	} else {
 		switch req.Op {
@@ -711,18 +715,21 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			if err := s.messageStorage.CreateMessage(req.Message, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate post failed: %v", err)
 			}
+			now := time.Now().Format("15:04:05.000")
 			log.Printf("[%s] [Node %s] Replicated PostMessage: %d", now, s.nodeID, req.Message.Id)
 
 		case api.OpType_OP_UPDATE:
 			if err := s.messageStorage.UpdateMessage(req.Message, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate update failed: %v", err)
 			}
+			now := time.Now().Format("15:04:05.000")
 			log.Printf("[%s] [Node %s] Replicated UpdateMessage: %d", now, s.nodeID, req.Message.Id)
 
 		case api.OpType_OP_DELETE:
 			if err := s.messageStorage.DeleteMessage(req.Message.Id, req.Message.TopicId, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate delete failed: %v", err)
 			}
+			now := time.Now().Format("15:04:05.000")
 			log.Printf("[%s] [Node %s] Replicated DeleteMessage: %d", now, s.nodeID, req.Message.Id)
 
 		case api.OpType_OP_LIKE:
@@ -734,6 +741,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			}, &liked); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate like failed: %v", err)
 			}
+			now := time.Now().Format("15:04:05.000")
 			log.Printf("[%s] [Node %s] Replicated LikeMessage: %d (User %d)", now, s.nodeID, req.Message.Id, req.Message.UserId)
 		}
 	}
@@ -745,10 +753,11 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 		if err != nil {
 			return nil, err
 		}
+		now = time.Now().Format("15:04:05.000")
 		log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
 		return resp, nil
 	}
-
+	now = time.Now().Format("15:04:05.000")
 	log.Printf("[%s] [Node %s] Tail processed sequence %d, sending ack", now, s.nodeID, req.SequenceNumber)
 	return &api.ReplicationResponse{AckSequenceNumber: req.SequenceNumber}, nil
 }
