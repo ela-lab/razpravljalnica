@@ -18,11 +18,13 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // MessageBoardServer implements the MessageBoard service
 type MessageBoardServer struct {
 	api.UnimplementedMessageBoardServer
+	api.UnimplementedReplicationServiceServer
 
 	userStorage         storage.UserStorage
 	topicStorage        storage.TopicStorage
@@ -43,12 +45,11 @@ type MessageBoardServer struct {
 	tokensLock         sync.RWMutex
 
 	// Node info
-	nodeID  string
-	address string
-	nextNodeID string
-	nextAddress string
-	nextReplica api.ReplicationServiceClient
-
+	nodeID       string
+	address      string
+	nextAddress  string
+	nextReplica  api.ReplicationServiceClient
+	eventCounter int64
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -58,7 +59,7 @@ type SubscriptionInfo struct {
 }
 
 // NewMessageBoardServer creates a new server instance
-func NewMessageBoardServer(nodeID, address string, nextNodeID string, nextAddress string) *MessageBoardServer {
+func NewMessageBoardServer(nodeID, address string, nextAddress string) *MessageBoardServer {
 	return &MessageBoardServer{
 		userStorage:         *storage.NewUserStorage(),
 		topicStorage:        *storage.NewTopicStorage(),
@@ -69,16 +70,16 @@ func NewMessageBoardServer(nodeID, address string, nextNodeID string, nextAddres
 		subscriptionTokens:  make(map[string]*SubscriptionInfo),
 		nodeID:              nodeID,
 		address:             address,
-		nextNodeID:			 nextNodeID,
-		nextAddress: 		 nextAddress,	
+		nextAddress:         nextAddress,
+		eventCounter:        0,
 	}
 }
 
 // CreateUser creates a new user
 func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUserRequest) (*api.User, error) {
 	if s.nodeID != "head" {
-        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+	}
 	userID := atomic.AddInt64(&s.userIDCounter, 1)
 
 	user := &api.User{
@@ -94,6 +95,24 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUser
 		return nil, status.Errorf(codes.Internal, "failed to create user: %v", err)
 	}
 
+	seq := atomic.AddInt64(&s.eventCounter, 1)
+
+	if s.nextReplica != nil {
+		repReq := &api.ReplicationRequest{
+			User:           user,
+			SequenceNumber: seq,
+		}
+
+		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "replication failed: %v", err)
+		}
+
+		if resp.AckSequenceNumber != seq {
+			return nil, status.Errorf(codes.Internal, "replication out of order")
+		}
+	}
+
 	log.Printf("Created user: %d - %s", user.Id, user.Name)
 	return user, nil
 }
@@ -101,8 +120,8 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUser
 // GetUser returns user info by id
 func (s *MessageBoardServer) GetUser(ctx context.Context, req *api.GetUserRequest) (*api.User, error) {
 	if s.nodeID != "tail" {
-        return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+	}
 	var name string
 	if err := s.userStorage.ReadUser(req.UserId, &name); err != nil || name == "" {
 		return nil, status.Errorf(codes.NotFound, "user not found: %d", req.UserId)
@@ -114,8 +133,8 @@ func (s *MessageBoardServer) GetUser(ctx context.Context, req *api.GetUserReques
 // CreateTopic creates a new topic
 func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTopicRequest) (*api.Topic, error) {
 	if s.nodeID != "head" {
-        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+	}
 	topicID := atomic.AddInt64(&s.topicIDCounter, 1)
 
 	topic := &api.Topic{
@@ -128,6 +147,24 @@ func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTop
 		return nil, status.Errorf(codes.Internal, "failed to create topic: %v", err)
 	}
 
+	seq := atomic.AddInt64(&s.eventCounter, 1)
+
+	if s.nextReplica != nil {
+		repReq := &api.ReplicationRequest{
+			Topic:          topic,
+			SequenceNumber: seq,
+		}
+
+		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "replication failed: %v", err)
+		}
+
+		if resp.AckSequenceNumber != seq {
+			return nil, status.Errorf(codes.Internal, "replication out of order")
+		}
+	}
+
 	log.Printf("Created topic: %d - %s", topic.Id, topic.Name)
 	return topic, nil
 }
@@ -135,8 +172,8 @@ func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTop
 // PostMessage posts a new message to a topic
 func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessageRequest) (*api.Message, error) {
 	if s.nodeID != "head" {
-        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+	}
 	// Verify user exists
 	var userName string
 	if err := s.userStorage.ReadUser(req.UserId, &userName); err != nil || userName == "" {
@@ -179,6 +216,25 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessa
 		return nil, status.Errorf(codes.Internal, "failed to create message: %v", err)
 	}
 
+	seq := atomic.AddInt64(&s.eventCounter, 1)
+
+	if s.nextReplica != nil {
+		repReq := &api.ReplicationRequest{
+			Op:             api.OpType_OP_POST,
+			Message:        message,
+			SequenceNumber: seq,
+		}
+
+		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "replication failed: %v", err)
+		}
+
+		if resp.AckSequenceNumber != seq {
+			return nil, status.Errorf(codes.Internal, "replication out of order")
+		}
+	}
+
 	log.Printf("Posted message: %d in topic %d by user %d", message.Id, message.TopicId, message.UserId)
 
 	// Broadcast to subscribers
@@ -195,8 +251,8 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessa
 // UpdateMessage updates an existing message
 func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateMessageRequest) (*api.Message, error) {
 	if s.nodeID != "head" {
-        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+	}
 	// Get existing messages for the topic
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
@@ -234,6 +290,25 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateM
 		return nil, status.Errorf(codes.Internal, "failed to update message: %v", err)
 	}
 
+	seq := atomic.AddInt64(&s.eventCounter, 1)
+
+	if s.nextReplica != nil {
+		repReq := &api.ReplicationRequest{
+			Op:             api.OpType_OP_UPDATE,
+			Message:        updatedMessage,
+			SequenceNumber: seq,
+		}
+
+		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "replication failed: %v", err)
+		}
+
+		if resp.AckSequenceNumber != seq {
+			return nil, status.Errorf(codes.Internal, "replication out of order")
+		}
+	}
+
 	log.Printf("Updated message: %d", updatedMessage.Id)
 
 	// Broadcast to subscribers
@@ -250,8 +325,8 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateM
 // DeleteMessage deletes an existing message
 func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteMessageRequest) (*emptypb.Empty, error) {
 	if s.nodeID != "head" {
-        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+	}
 	// Get existing messages for the topic
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
@@ -280,6 +355,25 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteM
 		return nil, status.Errorf(codes.Internal, "failed to delete message: %v", err)
 	}
 
+	seq := atomic.AddInt64(&s.eventCounter, 1)
+
+	if s.nextReplica != nil {
+		repReq := &api.ReplicationRequest{
+			Op:             api.OpType_OP_DELETE,
+			Message:        messageToDelete,
+			SequenceNumber: seq,
+		}
+
+		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "replication failed: %v", err)
+		}
+
+		if resp.AckSequenceNumber != seq {
+			return nil, status.Errorf(codes.Internal, "replication out of order")
+		}
+	}
+
 	log.Printf("Deleted message: %d", req.MessageId)
 
 	// Broadcast to subscribers
@@ -296,8 +390,8 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteM
 // LikeMessage adds a like to a message
 func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessageRequest) (*api.Message, error) {
 	if s.nodeID != "head" {
-        return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
+	}
 	// Get existing messages for the topic
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
@@ -345,6 +439,25 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessa
 		Likes:     int32(likeCount),
 	}
 
+	seq := atomic.AddInt64(&s.eventCounter, 1)
+
+	if s.nextReplica != nil {
+		repReq := &api.ReplicationRequest{
+			Op:             api.OpType_OP_LIKE,
+			Message:        updatedMessage,
+			SequenceNumber: seq,
+		}
+
+		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "replication failed: %v", err)
+		}
+
+		if resp.AckSequenceNumber != seq {
+			return nil, status.Errorf(codes.Internal, "replication out of order")
+		}
+	}
+
 	log.Printf("Liked message: %d (now %d likes)", req.MessageId, likeCount)
 
 	// Broadcast to subscribers
@@ -386,8 +499,8 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 // ListTopics returns all topics
 func (s *MessageBoardServer) ListTopics(ctx context.Context, req *emptypb.Empty) (*api.ListTopicsResponse, error) {
 	if s.nodeID != "tail" {
-        return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+	}
 	var topics []*api.Topic
 	if err := s.topicStorage.ReadTopics(&topics); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read topics: %v", err)
@@ -401,8 +514,8 @@ func (s *MessageBoardServer) ListTopics(ctx context.Context, req *emptypb.Empty)
 // ListSubscriptions returns subscriptions for a user
 func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.ListSubscriptionsRequest) (*api.ListSubscriptionsResponse, error) {
 	if s.nodeID != "tail" {
-        return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+	}
 	resp := &api.ListSubscriptionsResponse{}
 	resp.TopicId = make([]int64, 0)
 	if req == nil {
@@ -420,8 +533,8 @@ func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.Lis
 // GetMessages returns messages from a topic
 func (s *MessageBoardServer) GetMessages(ctx context.Context, req *api.GetMessagesRequest) (*api.GetMessagesResponse, error) {
 	if s.nodeID != "tail" {
-        return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
-    }
+		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+	}
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read messages: %v", err)
@@ -578,79 +691,86 @@ func generateToken() string {
 	return hex.EncodeToString(b)
 }
 
-func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.ReplicationRequest,) (*api.ReplicationResponse, error) {
-
+func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.ReplicationRequest) (*api.ReplicationResponse, error) {
 	var ret struct{}
+	now := time.Now().Format("15:04:05.000") // HH:MM:SS.mmm
 
 	if req.User != nil {
 		if err := s.userStorage.CreateUser(req.User, &ret); err != nil {
 			return nil, status.Errorf(codes.Internal, "replicate create user failed: %v", err)
 		}
+		log.Printf("[%s] [Node %s] Replicated CreateUser: %d", now, s.nodeID, req.User.Id)
 	} else if req.Topic != nil {
 		if err := s.topicStorage.CreateTopic(req.Topic, &ret); err != nil {
 			return nil, status.Errorf(codes.Internal, "replicate create topic failed: %v", err)
 		}
+		log.Printf("[%s] [Node %s] Replicated CreateTopic: %d", now, s.nodeID, req.Topic.Id)
 	} else {
 		switch req.Op {
-
 		case api.OpType_OP_POST:
 			if err := s.messageStorage.CreateMessage(req.Message, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate post failed: %v", err)
 			}
+			log.Printf("[%s] [Node %s] Replicated PostMessage: %d", now, s.nodeID, req.Message.Id)
 
 		case api.OpType_OP_UPDATE:
 			if err := s.messageStorage.UpdateMessage(req.Message, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate update failed: %v", err)
 			}
+			log.Printf("[%s] [Node %s] Replicated UpdateMessage: %d", now, s.nodeID, req.Message.Id)
 
 		case api.OpType_OP_DELETE:
-			if err := s.messageStorage.DeleteMessage(
-				req.Message.Id,
-				req.Message.TopicId,
-				&ret,); err != nil {
+			if err := s.messageStorage.DeleteMessage(req.Message.Id, req.Message.TopicId, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate delete failed: %v", err)
 			}
+			log.Printf("[%s] [Node %s] Replicated DeleteMessage: %d", now, s.nodeID, req.Message.Id)
 
 		case api.OpType_OP_LIKE:
 			var liked bool
 			if err := s.likeStorage.ToggleLike(&api.Like{
 				TopicId:   req.Message.TopicId,
 				MessageId: req.Message.Id,
-				UserId:    req.Message.UserId,}, &liked); err != nil {
+				UserId:    req.Message.UserId,
+			}, &liked); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate like failed: %v", err)
 			}
+			log.Printf("[%s] [Node %s] Replicated LikeMessage: %d (User %d)", now, s.nodeID, req.Message.Id, req.Message.UserId)
 		}
 	}
 
 	atomic.StoreInt64(&s.sequenceCounter, req.SequenceNumber)
 
-	if s.nextNodeID != "tail" {
-		_, err := s.nextReplica.ReplicateOperation(ctx, req)
-        if err != nil {
-            return nil, err
-        }
+	if s.nextReplica != nil {
+		resp, err := s.nextReplica.ReplicateOperation(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
+		return resp, nil
 	}
 
-	return &api.ReplicationResponse{AckSequenceNumber: req.SequenceNumber,}, nil
+	log.Printf("[%s] [Node %s] Tail processed sequence %d, sending ack", now, s.nodeID, req.SequenceNumber)
+	return &api.ReplicationResponse{AckSequenceNumber: req.SequenceNumber}, nil
 }
 
 
 // StartServer starts the gRPC server
-func StartServer(id string, url string, nextNodeId string, nextAddress string) {
+func StartServer(id string, url string, nextAddress string) {
 	lis, err := net.Listen("tcp", url)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
 	grpcServer := grpc.NewServer()
-	server := NewMessageBoardServer(id, url, nextNodeId, nextAddress)
+	server := NewMessageBoardServer(id, url, nextAddress)
 
 	api.RegisterMessageBoardServer(grpcServer, server)
+	api.RegisterReplicationServiceServer(grpcServer, server)
 
 	log.Printf("Server listening on %s", url)
 
 	if nextAddress != "" {
-		conn, err := grpc.NewClient(nextAddress)
+		conn, err := grpc.NewClient(nextAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Fatalf("failed to connect to next node: %v", err)
 		}
