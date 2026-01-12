@@ -565,6 +565,34 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 		}
 	}
 
+	// Map the first token to the full topic set so a single stream can cover all requested topics
+	s.tokensLock.Lock()
+	s.subscriptionTokens[firstToken] = &SubscriptionInfo{
+		UserID:   req.UserId,
+		TopicIDs: append([]int64(nil), req.TopicId...),
+	}
+	s.tokensLock.Unlock()
+
+	// Replicate the aggregated mapping so the selected node knows the token covers all topics
+	if s.nextReplica != nil {
+		seq := atomic.AddInt64(&s.sequenceCounter, 1)
+		repReq := &api.ReplicationRequest{
+			Op:             api.OpType_OP_TOKEN,
+			Token:          firstToken,
+			UserId:         req.UserId,
+			TopicIds:       append([]int64(nil), req.TopicId...),
+			SequenceNumber: seq,
+		}
+		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "token replication failed: %v", err)
+		}
+		if resp.AckSequenceNumber != seq {
+			return nil, status.Errorf(codes.Internal, "token replication out of order")
+		}
+		log.Printf("Aggregated token %s replicated for user %d topics %v (sequence: %d)", firstToken, req.UserId, req.TopicId, seq)
+	}
+
 	return &api.SubscriptionNodeResponse{
 		SubscribeToken: firstToken,
 		Node:           firstNode,
@@ -675,17 +703,6 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 		return status.Errorf(codes.PermissionDenied, "token does not match user ID")
 	}
 
-	// Enforce exactly one topic per subscription request and token-topic match
-	if len(req.TopicId) != 1 {
-		return status.Errorf(codes.InvalidArgument, "exactly one topic id must be provided per subscription stream")
-	}
-	if len(subInfo.TopicIDs) != 1 {
-		return status.Errorf(codes.Internal, "subscription token is not bound to exactly one topic")
-	}
-	if req.TopicId[0] != subInfo.TopicIDs[0] {
-		return status.Errorf(codes.PermissionDenied, "token is not valid for requested topic")
-	}
-
 	// Create subscription channel
 	eventChan := make(chan *api.MessageEvent, 100)
 	token := req.SubscribeToken
@@ -694,31 +711,34 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 	s.subscribers[token] = eventChan
 	s.subscribersLock.Unlock()
 
-	// Register subscription (single topic)
+	// Register subscriptions (allow multiple topics)
 	var ret struct{}
-	s.subscriptionStorage.CreateSubscription(req.UserId, req.TopicId[0], &ret)
-	log.Printf("Subscription stored: user=%d topic=%d", req.UserId, req.TopicId[0])
+	for _, topicID := range req.TopicId {
+		s.subscriptionStorage.CreateSubscription(req.UserId, topicID, &ret)
+	}
+	log.Printf("Subscription stored: user=%d topics=%v", req.UserId, req.TopicId)
 
 	// Send historical messages if requested
 	if req.FromMessageId > 0 {
-		topicID := req.TopicId[0]
-		var messages []*api.Message
-		if err := s.messageStorage.ReadMessages(topicID, &messages); err == nil {
-			for _, msg := range messages {
-				if msg.Id >= req.FromMessageId {
-					// Update like count
-					var likeCount int64
-					s.likeStorage.ReadLikes(msg.Id, &likeCount)
-					msg.Likes = int32(likeCount)
+		for _, topicID := range req.TopicId {
+			var messages []*api.Message
+			if err := s.messageStorage.ReadMessages(topicID, &messages); err == nil {
+				for _, msg := range messages {
+					if msg.Id >= req.FromMessageId {
+						// Update like count
+						var likeCount int64
+						s.likeStorage.ReadLikes(msg.Id, &likeCount)
+						msg.Likes = int32(likeCount)
 
-					event := &api.MessageEvent{
-						SequenceNumber: atomic.AddInt64(&s.sequenceCounter, 1),
-						Op:             api.OpType_OP_POST,
-						Message:        msg,
-						EventAt:        msg.CreatedAt,
-					}
-					if err := stream.Send(event); err != nil {
-						return err
+						event := &api.MessageEvent{
+							SequenceNumber: atomic.AddInt64(&s.sequenceCounter, 1),
+							Op:             api.OpType_OP_POST,
+							Message:        msg,
+							EventAt:        msg.CreatedAt,
+						}
+						if err := stream.Send(event); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -731,7 +751,7 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 		delete(s.subscribers, token)
 		close(eventChan)
 		s.subscribersLock.Unlock()
-		log.Printf("Subscription stream closed for user %d topic: %d (reason: %v)", req.UserId, req.TopicId[0], ctx.Err())
+		log.Printf("Subscription stream closed for user %d topics: %v (reason: %v)", req.UserId, req.TopicId, ctx.Err())
 	}()
 
 	for {
