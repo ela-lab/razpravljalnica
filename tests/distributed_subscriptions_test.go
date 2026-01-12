@@ -78,7 +78,7 @@ func TestDistributedSubscriptions(t *testing.T) {
 	var headConn *grpc.ClientConn
 	var err error
 	for i := 0; i < 10; i++ {
-		headConn, err = grpc.Dial(node1Addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock(), grpc.WithTimeout(1*time.Second))
+		headConn, err = grpc.NewClient(node1Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err == nil {
 			break
 		}
@@ -148,6 +148,9 @@ func TestDistributedSubscriptions(t *testing.T) {
 	defer sub1.cancel()
 	defer sub2.cancel()
 	defer sub3.cancel()
+	defer sub1.conn.Close()
+	defer sub2.conn.Close()
+	defer sub3.conn.Close()
 
 	// Post messages via head and verify each user receives on their node
 	var wg sync.WaitGroup
@@ -268,7 +271,7 @@ func findAvailablePort(t *testing.T) int {
 }
 
 func getSubscriptionNode(t *testing.T, headAddr string, userID, topicID int64) (*api.NodeInfo, string) {
-	conn, err := grpc.Dial(headAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(headAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("Failed to dial: %v", err)
 	}
@@ -289,10 +292,11 @@ func getSubscriptionNode(t *testing.T, headAddr string, userID, topicID int64) (
 type subscription struct {
 	stream api.MessageBoard_SubscribeTopicClient
 	cancel context.CancelFunc
+	conn   *grpc.ClientConn
 }
 
 func subscribeToNode(t *testing.T, nodeAddr, token string, userID, topicID int64) *subscription {
-	conn, err := grpc.Dial(nodeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(nodeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("Failed to dial subscription node: %v", err)
 	}
@@ -308,11 +312,13 @@ func subscribeToNode(t *testing.T, nodeAddr, token string, userID, topicID int64
 	})
 	if err != nil {
 		cancel()
+		conn.Close()
 		t.Fatalf("Failed to subscribe: %v", err)
 	}
 
 	return &subscription{
 		stream: stream,
 		cancel: cancel,
+		conn:   conn,
 	}
 }
