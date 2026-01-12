@@ -54,6 +54,11 @@ type MessageBoardServer struct {
 	// Control plane connection
 	controlPlaneClient api.ControlPlaneClient
 	controlPlaneConn   *grpc.ClientConn
+
+	// Subscription responsibility (modulo-based)
+	myModuloIndex      int32
+	totalNodes         int32
+	responsibilityLock sync.RWMutex
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -680,6 +685,11 @@ func (s *MessageBoardServer) broadcastEvent(event *api.MessageEvent, topicID int
 		}
 
 		if subscribed {
+			// Check if this node is responsible for this user's broadcasts
+			if !s.isResponsibleForUser(subInfo.UserID) {
+				continue
+			}
+
 			select {
 			case eventChan <- event:
 			case <-time.After(100 * time.Millisecond):
@@ -688,6 +698,20 @@ func (s *MessageBoardServer) broadcastEvent(event *api.MessageEvent, topicID int
 			}
 		}
 	}
+}
+
+// isResponsibleForUser checks if this node should broadcast to this user
+func (s *MessageBoardServer) isResponsibleForUser(userID int64) bool {
+	s.responsibilityLock.RLock()
+	defer s.responsibilityLock.RUnlock()
+
+	// If no control plane or no nodes registered, broadcast to all (default behavior)
+	if s.totalNodes == 0 {
+		return true
+	}
+
+	// Modulo-based responsibility: userID % totalNodes == myModuloIndex
+	return (userID % int64(s.totalNodes)) == int64(s.myModuloIndex)
 }
 
 // generateToken generates a random subscription token
@@ -752,12 +776,57 @@ func (s *MessageBoardServer) registerAndHeartbeat(isHead, isTail bool) {
 	// Initial registration
 	register()
 
+	// Sync responsibility immediately
+	s.syncResponsibility()
+
 	// Send heartbeat every 3 seconds
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		register()
+		// Also sync responsibility to pick up cluster changes
+		s.syncResponsibility()
+	}
+}
+
+// syncResponsibility queries control plane for this node's subscription responsibility
+func (s *MessageBoardServer) syncResponsibility() {
+	if s.controlPlaneClient == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resp, err := s.controlPlaneClient.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
+
+	if err != nil {
+		log.Printf("Failed to sync responsibility: %v", err)
+		return
+	}
+
+	// Find this node's assignment
+	var myIndex int32 = -1
+	var totalNodes int32 = 0
+
+	for _, assignment := range resp.Assignments {
+		if assignment.Node.NodeId == s.nodeID {
+			myIndex = assignment.ModuloIndex
+			totalNodes = assignment.TotalNodes
+			break
+		}
+	}
+
+	if myIndex >= 0 {
+		s.responsibilityLock.Lock()
+		s.myModuloIndex = myIndex
+		s.totalNodes = totalNodes
+		s.responsibilityLock.Unlock()
+
+		log.Printf("Updated responsibility: myIndex=%d, totalNodes=%d", myIndex, totalNodes)
+	} else {
+		log.Printf("Node not found in responsibility assignments")
 	}
 }
 
