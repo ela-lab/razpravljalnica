@@ -127,8 +127,21 @@ make build-tui
 
 **TUI Client (Terminal UI):**
 ```bash
+# Connect to head node
 ./bin/razpravljalnica-tui -s localhost -p 9001
+
+# The TUI automatically:
+# - Sends all writes to the head node
+# - Gets subscription assignments from head
+# - Connects to assigned nodes for streaming
 ```
+
+**TUI Features:**
+- F1: Help, F2: Login/Register, F3: Create Topic
+- S: Subscribe/Unsubscribe to selected topic
+- E: Edit your messages, Del: Delete your messages
+- Enter: Like/Unlike messages, send messages
+- Automatic routing to subscription nodes
 
 ## Testing
 
