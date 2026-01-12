@@ -56,9 +56,11 @@ type MessageBoardServer struct {
 	controlPlaneConn   *grpc.ClientConn
 
 	// Subscription responsibility (modulo-based)
-	myModuloIndex      int32
-	totalNodes         int32
-	responsibilityLock sync.RWMutex
+	myModuloIndex       int32
+	totalNodes          int32
+	responsibilityLock  sync.RWMutex
+	lastResponsibilityUpdate time.Time
+	controlPlaneAvailable    bool
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -519,8 +521,16 @@ func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID 
 	// Query control plane for node assignments
 	resp, err := s.controlPlaneClient.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
 	if err != nil {
-		log.Printf("Failed to get subscription assignments: %v", err)
-		// Fallback to this node
+		log.Printf("Failed to get subscription assignments: %v (using cached assignments)", err)
+		// Use cached assignments (may be stale)
+		s.responsibilityLock.RLock()
+		staleness := time.Since(s.lastResponsibilityUpdate)
+		if staleness > 60*time.Second {
+			log.Printf("Warning: cached assignments stale for %.0fs", staleness.Seconds())
+		}
+		s.responsibilityLock.RUnlock()
+		
+		// Fallback to this node if no cached info
 		return &api.NodeInfo{
 			NodeId:  s.nodeID,
 			Address: s.address,
@@ -758,6 +768,11 @@ func (s *MessageBoardServer) isResponsibleForUser(userID int64) bool {
 		return true
 	}
 
+	// Warn if control plane is unavailable and assignments are getting stale
+	if !s.controlPlaneAvailable && time.Since(s.lastResponsibilityUpdate) > 30*time.Second {
+		log.Printf("Warning: control plane unavailable for %.0fs, using stale responsibility assignments", time.Since(s.lastResponsibilityUpdate).Seconds())
+	}
+
 	// Modulo-based responsibility: userID % totalNodes == myModuloIndex
 	return (userID % int64(s.totalNodes)) == int64(s.myModuloIndex)
 }
@@ -850,7 +865,12 @@ func (s *MessageBoardServer) syncResponsibility() {
 	resp, err := s.controlPlaneClient.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
 
 	if err != nil {
-		log.Printf("Failed to sync responsibility: %v", err)
+		s.responsibilityLock.Lock()
+		s.controlPlaneAvailable = false
+		elapsed := time.Since(s.lastResponsibilityUpdate)
+		s.responsibilityLock.Unlock()
+
+		log.Printf("Failed to sync responsibility (stale for %.1fs): %v", elapsed.Seconds(), err)
 		return
 	}
 
@@ -870,9 +890,11 @@ func (s *MessageBoardServer) syncResponsibility() {
 		s.responsibilityLock.Lock()
 		s.myModuloIndex = myIndex
 		s.totalNodes = totalNodes
+		s.lastResponsibilityUpdate = time.Now()
+		s.controlPlaneAvailable = true
 		s.responsibilityLock.Unlock()
 
-		log.Printf("Updated responsibility: myIndex=%d, totalNodes=%d", myIndex, totalNodes)
+		log.Printf("Updated responsibility: myIndex=%d, totalNodes=%d (control plane available)", myIndex, totalNodes)
 	} else {
 		log.Printf("Node not found in responsibility assignments")
 	}
