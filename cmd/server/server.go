@@ -497,14 +497,62 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 
 	log.Printf("Generated subscription token for user %d: %s", req.UserId, token)
 
-	// Return this node (single server implementation)
+	// Determine which node should handle this subscription
+	targetNode := s.assignSubscriptionNode(ctx, req.UserId)
+
 	return &api.SubscriptionNodeResponse{
 		SubscribeToken: token,
-		Node: &api.NodeInfo{
+		Node:           targetNode,
+	}, nil
+}
+
+// assignSubscriptionNode calculates which node should handle a subscription for a given user
+func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID int64) *api.NodeInfo {
+	// If no control plane, default to this node
+	if s.controlPlaneClient == nil {
+		return &api.NodeInfo{
 			NodeId:  s.nodeID,
 			Address: s.address,
-		},
-	}, nil
+		}
+	}
+
+	// Query control plane for node assignments
+	resp, err := s.controlPlaneClient.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
+	if err != nil {
+		log.Printf("Failed to get subscription assignments: %v", err)
+		// Fallback to this node
+		return &api.NodeInfo{
+			NodeId:  s.nodeID,
+			Address: s.address,
+		}
+	}
+
+	totalNodes := int32(len(resp.Assignments))
+	if totalNodes == 0 {
+		// No nodes registered, use this one
+		return &api.NodeInfo{
+			NodeId:  s.nodeID,
+			Address: s.address,
+		}
+	}
+
+	// Calculate target modulo index
+	targetIndex := userID % int64(totalNodes)
+
+	// Find node with matching modulo index
+	for _, assignment := range resp.Assignments {
+		if int64(assignment.ModuloIndex) == targetIndex {
+			log.Printf("Assigned user %d to node %s (index %d of %d)", userID, assignment.Node.NodeId, targetIndex, totalNodes)
+			return assignment.Node
+		}
+	}
+
+	// Fallback (shouldn't happen if control plane is working correctly)
+	log.Printf("Warning: no node found for user %d, falling back to self", userID)
+	return &api.NodeInfo{
+		NodeId:  s.nodeID,
+		Address: s.address,
+	}
 }
 
 // ListTopics returns all topics
