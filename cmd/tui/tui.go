@@ -705,6 +705,11 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 		return
 	}
 
+	// Skip if no topics to subscribe to
+	if len(topicIDs) == 0 {
+		return
+	}
+
 	// cancel previous stream if any
 	if t.subCancel != nil {
 		t.subCancel()
@@ -995,25 +1000,32 @@ func (t *TUIApp) syncSubscriptionsFromServer() {
 		return
 	}
 
-	subscribedIDs, err := t.tailService.ListSubscriptions(t.currentUser)
-	if err != nil {
-		t.showStatus(fmt.Sprintf("[red]Failed to load subscriptions: %v[white]", err))
-		return
-	}
-
-	// Replace local state with server state
-	t.subscribedTopics = make(map[int64]bool)
-	for _, id := range subscribedIDs {
-		t.subscribedTopics[id] = true
-	}
-
-	// Refresh UI elements that depend on subscriptions
-	if err := t.loadTopics(); err == nil {
-		if t.currentTopicID == 0 {
-			t.loadSubscriptionFeed()
+	// Run network call in background to avoid freezing UI
+	go func() {
+		subscribedIDs, err := t.tailService.ListSubscriptions(t.currentUser)
+		if err != nil {
+			t.app.QueueUpdateDraw(func() {
+				t.showStatus(fmt.Sprintf("[red]Failed to load subscriptions: %v[white]", err))
+			})
+			return
 		}
-	}
-	t.refreshTopBar()
+
+		// Replace local state with server state
+		t.app.QueueUpdateDraw(func() {
+			t.subscribedTopics = make(map[int64]bool)
+			for _, id := range subscribedIDs {
+				t.subscribedTopics[id] = true
+			}
+
+			// Refresh UI elements that depend on subscriptions
+			if err := t.loadTopics(); err == nil {
+				if t.currentTopicID == 0 {
+					t.loadSubscriptionFeed()
+				}
+			}
+			t.refreshTopBar()
+		})
+	}()
 }
 
 // ensureUserName resolves and caches a user name by ID
