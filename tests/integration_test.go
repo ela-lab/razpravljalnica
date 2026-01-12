@@ -19,53 +19,87 @@ import (
 
 // testServer wraps the server process for testing
 type testServer struct {
-	cmd     *exec.Cmd
-	address string
-	port    int
+	headCmd  *exec.Cmd
+	tailCmd  *exec.Cmd
+	headAddr string
+	tailAddr string
+	headPort int
+	tailPort int
 }
 
-// startTestServer starts the real server binary for integration testing
+// startTestServer starts a 2-node chain for integration testing (head + tail)
 func startTestServer(t *testing.T) *testServer {
-	// Find available port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// Find available ports
+	listener1, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Failed to find available port: %v", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	headPort := listener1.Addr().(*net.TCPAddr).Port
+	listener1.Close()
 
-	// Start server process
-	cmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", port))
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Failed to start server: %v", err)
+	listener2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to find available port: %v", err)
+	}
+	tailPort := listener2.Addr().(*net.TCPAddr).Port
+	listener2.Close()
+
+	headAddr := fmt.Sprintf("localhost:%d", headPort)
+	tailAddr := fmt.Sprintf("localhost:%d", tailPort)
+
+	// Start head node
+	headCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", headPort), "-id", "head")
+	if err := headCmd.Start(); err != nil {
+		t.Fatalf("Failed to start head node: %v", err)
 	}
 
-	address := fmt.Sprintf("localhost:%d", port)
+	// Start tail node connected to head
+	tailCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", tailPort), "-id", "tail", "-prev", headAddr)
+	if err := tailCmd.Start(); err != nil {
+		headCmd.Process.Kill()
+		t.Fatalf("Failed to start tail node: %v", err)
+	}
+
 	ts := &testServer{
-		cmd:     cmd,
-		address: address,
-		port:    port,
+		headCmd:  headCmd,
+		tailCmd:  tailCmd,
+		headAddr: headAddr,
+		tailAddr: tailAddr,
+		headPort: headPort,
+		tailPort: tailPort,
 	}
 
-	// Wait for server to be ready
-	time.Sleep(500 * time.Millisecond)
+	// Wait for both nodes to start and stabilize
+	time.Sleep(1 * time.Second)
 
-	// Verify server is running
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Verify head is running
+	conn, err := grpc.NewClient(headAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		ts.stop()
-		t.Fatalf("Failed to connect to server: %v", err)
+		t.Fatalf("Failed to connect to head node: %v", err)
+	}
+	conn.Close()
+
+	// Verify tail is running
+	conn, err = grpc.NewClient(tailAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		ts.stop()
+		t.Fatalf("Failed to connect to tail node: %v", err)
 	}
 	conn.Close()
 
 	return ts
 }
 
-// stop stops the test server
+// stop stops both test servers
 func (ts *testServer) stop() {
-	if ts.cmd != nil && ts.cmd.Process != nil {
-		ts.cmd.Process.Kill()
-		ts.cmd.Wait()
+	if ts.headCmd != nil && ts.headCmd.Process != nil {
+		ts.headCmd.Process.Kill()
+		ts.headCmd.Wait()
+	}
+	if ts.tailCmd != nil && ts.tailCmd.Process != nil {
+		ts.tailCmd.Process.Kill()
+		ts.tailCmd.Wait()
 	}
 }
 
@@ -74,7 +108,7 @@ func TestUserCreation(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -107,7 +141,7 @@ func TestTopicCreation(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -125,7 +159,7 @@ func TestTopicCreation(t *testing.T) {
 		t.Errorf("Expected topic ID to be 1, got %d", topic.Id)
 	}
 
-	// List topics
+	// List topics - reads allowed on all nodes
 	topics, err := cs.ListTopics()
 	if err != nil {
 		t.Fatalf("Failed to list topics: %v", err)
@@ -140,7 +174,7 @@ func TestMessageLifecycle(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -171,7 +205,7 @@ func TestMessageLifecycle(t *testing.T) {
 		t.Errorf("Expected message topic ID %d, got %d", topic.Id, msg.TopicId)
 	}
 
-	// Get messages
+	// Get messages - reads allowed on all nodes
 	messages, err := cs.GetMessages(topic.Id, 0, 10)
 	if err != nil {
 		t.Fatalf("Failed to get messages: %v", err)
@@ -210,16 +244,25 @@ func TestLikeMessage(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer cs.Close()
 
 	// Create users and topic
-	user1, _ := cs.CreateUser("Alice")
-	user2, _ := cs.CreateUser("Bob")
-	topic, _ := cs.CreateTopic("Test Topic")
+	user1, err := cs.CreateUser("Alice")
+	if err != nil {
+		t.Fatalf("Failed to create user1: %v", err)
+	}
+	user2, err := cs.CreateUser("Bob")
+	if err != nil {
+		t.Fatalf("Failed to create user2: %v", err)
+	}
+	topic, err := cs.CreateTopic("Test Topic")
+	if err != nil {
+		t.Fatalf("Failed to create topic: %v", err)
+	}
 
 	// Post a message
 	msg, err := cs.PostMessage(user1.Id, topic.Id, "Like this message")
@@ -251,7 +294,7 @@ func TestUnauthorizedOperations(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -296,7 +339,7 @@ func TestNonExistentResources(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -325,7 +368,7 @@ func TestSubscription(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -398,7 +441,7 @@ func TestMultipleTopicSubscription(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -467,7 +510,7 @@ func TestConcurrentOperations(t *testing.T) {
 	srv := startTestServer(t)
 	defer srv.stop()
 
-	cs, err := client.NewClientService(srv.address, 5*time.Second)
+	cs, err := client.NewClientService(srv.headAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}

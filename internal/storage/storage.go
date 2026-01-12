@@ -16,6 +16,85 @@ func (e *UserAlreadyExistsError) Error() string {
 	return fmt.Sprintf("user with name '%s' already exists", e.Name)
 }
 
+// DirtyBitTracker tracks which records have been modified locally (dirty) vs replicated from tail (clean)
+// A record is marked dirty when first written, then clean when the ACK propagates back through the chain
+type DirtyBitTracker struct {
+	// messagesDirty tracks dirty state for messages: [topicID][messageID] = isDirty
+	messagesDirty map[int64]map[int64]bool
+	// likesDirty tracks dirty state for likes: [messageID][userID] = isDirty
+	likesDirty map[int64]map[int64]bool
+	lock       sync.RWMutex
+}
+
+func NewDirtyBitTracker() *DirtyBitTracker {
+	return &DirtyBitTracker{
+		messagesDirty: make(map[int64]map[int64]bool),
+		likesDirty:    make(map[int64]map[int64]bool),
+	}
+}
+
+// MarkMessageDirty marks a message as dirty (locally written, not yet ACKed)
+func (dbt *DirtyBitTracker) MarkMessageDirty(topicID, messageID int64) {
+	dbt.lock.Lock()
+	defer dbt.lock.Unlock()
+	if dbt.messagesDirty[topicID] == nil {
+		dbt.messagesDirty[topicID] = make(map[int64]bool)
+	}
+	dbt.messagesDirty[topicID][messageID] = true
+}
+
+// MarkMessageClean marks a message as clean (ACK received from successor)
+func (dbt *DirtyBitTracker) MarkMessageClean(topicID, messageID int64) {
+	dbt.lock.Lock()
+	defer dbt.lock.Unlock()
+	if dbt.messagesDirty[topicID] != nil {
+		dbt.messagesDirty[topicID][messageID] = false
+	}
+}
+
+// IsMessageDirty checks if a message is dirty
+func (dbt *DirtyBitTracker) IsMessageDirty(topicID, messageID int64) bool {
+	dbt.lock.RLock()
+	defer dbt.lock.RUnlock()
+	if dbt.messagesDirty[topicID] != nil {
+		if isDirty, ok := dbt.messagesDirty[topicID][messageID]; ok {
+			return isDirty
+		}
+	}
+	return false
+}
+
+// MarkLikeDirty marks a like as dirty
+func (dbt *DirtyBitTracker) MarkLikeDirty(messageID, userID int64) {
+	dbt.lock.Lock()
+	defer dbt.lock.Unlock()
+	if dbt.likesDirty[messageID] == nil {
+		dbt.likesDirty[messageID] = make(map[int64]bool)
+	}
+	dbt.likesDirty[messageID][userID] = true
+}
+
+// MarkLikeClean marks a like as clean
+func (dbt *DirtyBitTracker) MarkLikeClean(messageID, userID int64) {
+	dbt.lock.Lock()
+	defer dbt.lock.Unlock()
+	if dbt.likesDirty[messageID] != nil {
+		dbt.likesDirty[messageID][userID] = false
+	}
+}
+
+// IsLikeDirty checks if a like is dirty
+func (dbt *DirtyBitTracker) IsLikeDirty(messageID, userID int64) bool {
+	dbt.lock.RLock()
+	defer dbt.lock.RUnlock()
+	if dbt.likesDirty[messageID] != nil {
+		if isDirty, ok := dbt.likesDirty[messageID][userID]; ok {
+			return isDirty
+		}
+	}
+	return false
+}
+
 type UserStorage struct {
 	dict    map[int64]*api.User
 	nameIdx map[string]int64 // username -> user ID for fast lookup
@@ -97,6 +176,17 @@ func (us *UserStorage) ReadUser(id int64, name *string) error {
 	return nil
 }
 
+// GetAllUsers returns all users (for syncing)
+func (us *UserStorage) GetAllUsers() []*api.User {
+	us.lock.RLock()
+	defer us.lock.RUnlock()
+	users := make([]*api.User, 0, len(us.dict))
+	for _, user := range us.dict {
+		users = append(users, user)
+	}
+	return users
+}
+
 // LIKES
 func (ls *LikeStorage) CreateLike(like *api.Like, ret *struct{}) error {
 	ls.lock.Lock()
@@ -161,6 +251,19 @@ func (ls *LikeStorage) ReadLikes(messageId int64, likes *int64) error {
 	return nil
 }
 
+// GetAllLikes returns all likes (for syncing)
+func (ls *LikeStorage) GetAllLikes() map[int64][]int64 {
+	ls.lock.RLock()
+	defer ls.lock.RUnlock()
+	result := make(map[int64][]int64, len(ls.dict))
+	for msgID, userIDs := range ls.dict {
+		userIDCopy := make([]int64, len(userIDs))
+		copy(userIDCopy, userIDs)
+		result[msgID] = userIDCopy
+	}
+	return result
+}
+
 // MESSAGES
 func (ms *MessageStorage) CreateMessage(message *api.Message, ret *struct{}) error {
 	ms.lock.Lock()
@@ -207,6 +310,19 @@ func (ms *MessageStorage) ReadMessages(topicId int64, dict *[]*api.Message) erro
 	copy(*dict, msgs)
 
 	return nil
+}
+
+// GetAllMessages returns all messages across all topics (for syncing)
+func (ms *MessageStorage) GetAllMessages() map[int64][]*api.Message {
+	ms.lock.RLock()
+	defer ms.lock.RUnlock()
+	result := make(map[int64][]*api.Message, len(ms.dict))
+	for topicID, messages := range ms.dict {
+		messageCopy := make([]*api.Message, len(messages))
+		copy(messageCopy, messages)
+		result[topicID] = messageCopy
+	}
+	return result
 }
 
 func (ms *MessageStorage) UpdateMessage(message *api.Message, ret *struct{}) error {
@@ -269,4 +385,15 @@ func (ts *TopicStorage) ReadTopics(topics *[]*api.Topic) error {
 		*topics = append(*topics, val)
 	}
 	return nil
+}
+
+// GetAllTopics returns all topics (for syncing)
+func (ts *TopicStorage) GetAllTopics() []*api.Topic {
+	ts.lock.RLock()
+	defer ts.lock.RUnlock()
+	topics := make([]*api.Topic, 0, len(ts.dict))
+	for _, topic := range ts.dict {
+		topics = append(topics, topic)
+	}
+	return topics
 }

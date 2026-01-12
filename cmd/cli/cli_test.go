@@ -39,9 +39,9 @@ func startTestServer(t *testing.T) (int, func()) {
 		wd = parent
 	}
 
-	// Start server process
+	// Start server process as head node (required for write operations in chain replication)
 	serverBin := filepath.Join(wd, "bin", "razpravljalnica-server")
-	cmd := exec.Command(serverBin, "-p", fmt.Sprintf("%d", port))
+	cmd := exec.Command(serverBin, "-id", "head", "-p", fmt.Sprintf("%d", port))
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
