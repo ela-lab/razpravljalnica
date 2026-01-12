@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -160,14 +161,14 @@ func (cs *ClientService) GetMessages(topicID, fromMessageID int64, limit int32) 
 	return resp.Messages, nil
 }
 
-// GetSubscriptionNode gets a subscription token and node address
-func (cs *ClientService) GetSubscriptionNode(userID int64, topicIDs []int64) (string, *api.NodeInfo, error) {
+// GetSubscriptionNode gets a subscription token and node address for a single topic
+func (cs *ClientService) GetSubscriptionNode(userID int64, topicID int64) (string, *api.NodeInfo, error) {
 	ctx, cancel := cs.createContext()
 	defer cancel()
 
 	resp, err := cs.grpcClient.GetSubscriptionNode(ctx, &api.SubscriptionNodeRequest{
 		UserId:  userID,
-		TopicId: topicIDs,
+		TopicId: topicID,
 	})
 	if err != nil {
 		return "", nil, err
@@ -175,19 +176,88 @@ func (cs *ClientService) GetSubscriptionNode(userID int64, topicIDs []int64) (st
 	return resp.SubscribeToken, resp.Node, nil
 }
 
-// SubscribeToTopics subscribes to topic updates (returns a stream client)
-func (cs *ClientService) SubscribeToTopics(ctx context.Context, userID int64, topicIDs []int64, token string, fromMessageID int64) (api.MessageBoard_SubscribeTopicClient, error) {
+// GetSubscriptionNodesForTopics gets subscription tokens for multiple topics
+func (cs *ClientService) GetSubscriptionNodesForTopics(userID int64, topicIDs []int64) ([]string, *api.NodeInfo, error) {
+	tokens := make([]string, 0, len(topicIDs))
+	var nodeInfo *api.NodeInfo
+
+	for _, topicID := range topicIDs {
+		token, node, err := cs.GetSubscriptionNode(userID, topicID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get subscription for topic %d: %v", topicID, err)
+		}
+		tokens = append(tokens, token)
+		if nodeInfo == nil {
+			nodeInfo = node
+		}
+	}
+
+	return tokens, nodeInfo, nil
+}
+
+// SubscribeToTopic subscribes to a single topic (returns a stream client)
+func (cs *ClientService) SubscribeToTopic(ctx context.Context, userID int64, topicID int64, token string, fromMessageID int64) (api.MessageBoard_SubscribeTopicClient, error) {
 	return cs.grpcClient.SubscribeTopic(ctx, &api.SubscribeTopicRequest{
 		UserId:         userID,
-		TopicId:        topicIDs,
+		TopicId:        topicID,
 		SubscribeToken: token,
 		FromMessageId:  fromMessageID,
 	})
 }
 
-// StreamSubscription is a helper to stream events with a callback
-func (cs *ClientService) StreamSubscription(ctx context.Context, userID int64, topicIDs []int64, token string, fromMessageID int64, callback func(*api.MessageEvent) error) error {
-	stream, err := cs.SubscribeToTopics(ctx, userID, topicIDs, token, fromMessageID)
+// StreamMultipleSubscriptions streams events from multiple subscriptions concurrently
+func (cs *ClientService) StreamMultipleSubscriptions(ctx context.Context, userID int64, subscriptions []struct {
+	TopicID   int64
+	Token     string
+	FromMsgID int64
+}, callback func(*api.MessageEvent) error) error {
+	// Create a channel to collect events from all subscriptions
+	eventChan := make(chan *api.MessageEvent, len(subscriptions)*100)
+	errChan := make(chan error, len(subscriptions))
+
+	// Start a goroutine for each subscription
+	for _, sub := range subscriptions {
+		go func(topicID int64, token string, fromMsgID int64) {
+			err := cs.StreamSubscription(ctx, userID, topicID, token, fromMsgID, func(event *api.MessageEvent) error {
+				select {
+				case eventChan <- event:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			})
+			if err != nil && err != io.EOF && err != context.Canceled {
+				errChan <- err
+			}
+		}(sub.TopicID, sub.Token, sub.FromMsgID)
+	}
+
+	// Collect and process events
+	activeStreams := len(subscriptions)
+	for activeStreams > 0 {
+		select {
+		case event := <-eventChan:
+			if event != nil {
+				if err := callback(event); err != nil {
+					return err
+				}
+			}
+		case err := <-errChan:
+			if err != nil {
+				return err
+			}
+			activeStreams--
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return nil
+}
+
+// StreamSubscription is a helper to stream events from a single subscription with a callback
+func (cs *ClientService) StreamSubscription(ctx context.Context, userID int64, topicID int64, token string, fromMessageID int64, callback func(*api.MessageEvent) error) error {
+	stream, err := cs.SubscribeToTopic(ctx, userID, topicID, token, fromMessageID)
 	if err != nil {
 		return err
 	}

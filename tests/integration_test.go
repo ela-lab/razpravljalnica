@@ -47,14 +47,14 @@ func startTestServer(t *testing.T) *testServer {
 	headAddr := fmt.Sprintf("localhost:%d", headPort)
 	tailAddr := fmt.Sprintf("localhost:%d", tailPort)
 
-	// Start head node
-	headCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", headPort), "-id", "head")
+	// Start head node (isHead=true because nextPort is specified)
+	headCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", headPort), "-id", "head", "-nextPort", fmt.Sprintf("%d", tailPort))
 	if err := headCmd.Start(); err != nil {
 		t.Fatalf("Failed to start head node: %v", err)
 	}
 
-	// Start tail node connected to head
-	tailCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", tailPort), "-id", "tail", "-prev", headAddr)
+	// Start tail node (isHead=false, isTail=true because nextPort is 0)
+	tailCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", tailPort), "-id", "tail")
 	if err := tailCmd.Start(); err != nil {
 		headCmd.Process.Kill()
 		t.Fatalf("Failed to start tail node: %v", err)
@@ -379,7 +379,7 @@ func TestSubscription(t *testing.T) {
 	topic, _ := cs.CreateTopic("Live Topic")
 
 	// Get subscription token
-	token, _, err := cs.GetSubscriptionNode(user.Id, []int64{topic.Id})
+	token, _, err := cs.GetSubscriptionNode(user.Id, topic.Id)
 	if err != nil {
 		t.Fatalf("Failed to get subscription token: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestSubscription(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		err := cs.StreamSubscription(ctx, user.Id, []int64{topic.Id}, token, 0, func(event *api.MessageEvent) error {
+		err := cs.StreamSubscription(ctx, user.Id, topic.Id, token, 0, func(event *api.MessageEvent) error {
 			select {
 			case events <- event:
 			default:
@@ -452,10 +452,10 @@ func TestMultipleTopicSubscription(t *testing.T) {
 	topic1, _ := cs.CreateTopic("Topic 1")
 	topic2, _ := cs.CreateTopic("Topic 2")
 
-	// Get subscription token for both topics
-	token, _, err := cs.GetSubscriptionNode(user.Id, []int64{topic1.Id, topic2.Id})
+	// Get subscription tokens for both topics
+	tokens, _, err := cs.GetSubscriptionNodesForTopics(user.Id, []int64{topic1.Id, topic2.Id})
 	if err != nil {
-		t.Fatalf("Failed to get subscription token: %v", err)
+		t.Fatalf("Failed to get subscription tokens: %v", err)
 	}
 
 	// Start subscription
@@ -468,7 +468,23 @@ func TestMultipleTopicSubscription(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		cs.StreamSubscription(ctx, user.Id, []int64{topic1.Id, topic2.Id}, token, 0, func(event *api.MessageEvent) error {
+		subscriptions := make([]struct {
+			TopicID   int64
+			Token     string
+			FromMsgID int64
+		}, 2)
+		subscriptions[0] = struct {
+			TopicID   int64
+			Token     string
+			FromMsgID int64
+		}{TopicID: topic1.Id, Token: tokens[0], FromMsgID: 0}
+		subscriptions[1] = struct {
+			TopicID   int64
+			Token     string
+			FromMsgID int64
+		}{TopicID: topic2.Id, Token: tokens[1], FromMsgID: 0}
+
+		cs.StreamMultipleSubscriptions(ctx, user.Id, subscriptions, func(event *api.MessageEvent) error {
 			select {
 			case events <- event:
 			default:

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ela-lab/razpravljalnica/api"
@@ -26,6 +28,9 @@ type ControlPlaneServer struct {
 	tailNodeID     string
 	nodeOrder      []string // Ordered list of node IDs for consistent indexing
 	lastNodeUpdate time.Time
+
+	// Subscription round-robin counter
+	subscriptionRRCounter int64
 }
 
 // NodeState tracks node info and health
@@ -297,6 +302,30 @@ func (cp *ControlPlaneServer) ReportNodeFailure(ctx context.Context, req *api.Re
 	}
 
 	return &emptypb.Empty{}, nil
+}
+
+// AssignSubscriptionNode assigns a node for a subscription using round-robin
+func (cp *ControlPlaneServer) AssignSubscriptionNode(ctx context.Context, req *api.AssignSubscriptionNodeRequest) (*api.AssignSubscriptionNodeResponse, error) {
+	cp.mu.RLock()
+	defer cp.mu.RUnlock()
+
+	if len(cp.nodeOrder) == 0 {
+		return nil, fmt.Errorf("no nodes available in cluster")
+	}
+
+	// Use atomic counter for round-robin assignment per subscription
+	idx := atomic.AddInt64(&cp.subscriptionRRCounter, 1) - 1
+	nodeIndex := idx % int64(len(cp.nodeOrder))
+
+	nodeID := cp.nodeOrder[nodeIndex]
+	nodeState := cp.nodes[nodeID]
+
+	log.Printf("Control plane: Assigned subscription (user=%d, topic=%d) to node %s (index %d/%d)",
+		req.UserId, req.TopicId, nodeID, nodeIndex, len(cp.nodeOrder))
+
+	return &api.AssignSubscriptionNodeResponse{
+		Node: nodeState.Info,
+	}, nil
 }
 
 // healthCheckLoop periodically checks node health

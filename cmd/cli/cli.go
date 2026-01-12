@@ -202,10 +202,10 @@ func RunCLI() error {
 			},
 			{
 				Name:  "subscribe",
-				Usage: "subscribe to topics and receive real-time updates",
+				Usage: "subscribe to multiple topics and receive real-time updates",
 				Flags: []cli.Flag{
 					&cli.Int64Flag{Name: "userId", Required: true, Usage: "user ID"},
-					&cli.Int64SliceFlag{Name: "topicIds", Required: true, Usage: "topic IDs to subscribe to"},
+					&cli.Int64SliceFlag{Name: "topicIds", Required: true, Usage: "topic IDs to subscribe to (comma-separated)"},
 					&cli.Int64Flag{Name: "fromMessageId", Value: 0, Usage: "starting message ID for history"},
 				},
 				Action: func(ctx context.Context, c *cli.Command) error {
@@ -214,17 +214,40 @@ func RunCLI() error {
 						userID := c.Int64("userId")
 						fromMessageID := c.Int64("fromMessageId")
 
-						// Get subscription token
-						token, node, err := service.GetSubscriptionNode(userID, topicIDs)
+						if len(topicIDs) == 0 {
+							return fmt.Errorf("at least one topic ID must be provided")
+						}
+
+						// Get subscription tokens for all topics
+						tokens, node, err := service.GetSubscriptionNodesForTopics(userID, topicIDs)
 						if err != nil {
-							return fmt.Errorf("failed to get subscription: %w", err)
+							return fmt.Errorf("failed to get subscriptions: %w", err)
 						}
 
 						fmt.Printf("Subscribed to topics %v on node %s\n", topicIDs, node.Address)
-						fmt.Println("Listening for events (Ctrl+C to stop)...")
+						fmt.Println("Listening for events from all topics (Ctrl+C to stop)...")
 
-						// Stream events
-						return service.StreamSubscription(ctx, userID, topicIDs, token, fromMessageID, func(event *api.MessageEvent) error {
+						// Build subscriptions list
+						subscriptions := make([]struct {
+							TopicID   int64
+							Token     string
+							FromMsgID int64
+						}, len(topicIDs))
+
+						for i, topicID := range topicIDs {
+							subscriptions[i] = struct {
+								TopicID   int64
+								Token     string
+								FromMsgID int64
+							}{
+								TopicID:   topicID,
+								Token:     tokens[i],
+								FromMsgID: fromMessageID,
+							}
+						}
+
+						// Stream events from all subscriptions
+						return service.StreamMultipleSubscriptions(ctx, userID, subscriptions, func(event *api.MessageEvent) error {
 							fmt.Printf("[%s] %s: User %d in topic %d: %s (Likes: %d)\n",
 								event.EventAt.AsTime().Format("15:04:05"),
 								event.Op.String(),

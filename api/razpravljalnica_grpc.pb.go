@@ -754,6 +754,7 @@ const (
 	ControlPlane_RegisterNode_FullMethodName                  = "/razpravljalnica.ControlPlane/RegisterNode"
 	ControlPlane_GetSubscriptionResponsibility_FullMethodName = "/razpravljalnica.ControlPlane/GetSubscriptionResponsibility"
 	ControlPlane_ReportNodeFailure_FullMethodName             = "/razpravljalnica.ControlPlane/ReportNodeFailure"
+	ControlPlane_AssignSubscriptionNode_FullMethodName        = "/razpravljalnica.ControlPlane/AssignSubscriptionNode"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -770,6 +771,8 @@ type ControlPlaneClient interface {
 	GetSubscriptionResponsibility(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SubscriptionResponsibilityResponse, error)
 	// Notify control plane when a node detects its successor has failed
 	ReportNodeFailure(ctx context.Context, in *ReportNodeFailureRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Assign a subscription node using round-robin per-subscription
+	AssignSubscriptionNode(ctx context.Context, in *AssignSubscriptionNodeRequest, opts ...grpc.CallOption) (*AssignSubscriptionNodeResponse, error)
 }
 
 type controlPlaneClient struct {
@@ -820,6 +823,16 @@ func (c *controlPlaneClient) ReportNodeFailure(ctx context.Context, in *ReportNo
 	return out, nil
 }
 
+func (c *controlPlaneClient) AssignSubscriptionNode(ctx context.Context, in *AssignSubscriptionNodeRequest, opts ...grpc.CallOption) (*AssignSubscriptionNodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AssignSubscriptionNodeResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_AssignSubscriptionNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -834,6 +847,8 @@ type ControlPlaneServer interface {
 	GetSubscriptionResponsibility(context.Context, *emptypb.Empty) (*SubscriptionResponsibilityResponse, error)
 	// Notify control plane when a node detects its successor has failed
 	ReportNodeFailure(context.Context, *ReportNodeFailureRequest) (*emptypb.Empty, error)
+	// Assign a subscription node using round-robin per-subscription
+	AssignSubscriptionNode(context.Context, *AssignSubscriptionNodeRequest) (*AssignSubscriptionNodeResponse, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -855,6 +870,9 @@ func (UnimplementedControlPlaneServer) GetSubscriptionResponsibility(context.Con
 }
 func (UnimplementedControlPlaneServer) ReportNodeFailure(context.Context, *ReportNodeFailureRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportNodeFailure not implemented")
+}
+func (UnimplementedControlPlaneServer) AssignSubscriptionNode(context.Context, *AssignSubscriptionNodeRequest) (*AssignSubscriptionNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AssignSubscriptionNode not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -949,6 +967,24 @@ func _ControlPlane_ReportNodeFailure_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_AssignSubscriptionNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AssignSubscriptionNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).AssignSubscriptionNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_AssignSubscriptionNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).AssignSubscriptionNode(ctx, req.(*AssignSubscriptionNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -971,6 +1007,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportNodeFailure",
 			Handler:    _ControlPlane_ReportNodeFailure_Handler,
+		},
+		{
+			MethodName: "AssignSubscriptionNode",
+			Handler:    _ControlPlane_AssignSubscriptionNode_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -53,6 +53,9 @@ type MessageBoardServer struct {
 	nextReplicaConn *grpc.ClientConn
 	eventCounter    int64
 
+	// Round-robin subscription assignment counter
+	subscriptionRRCounter int64
+
 	// Control plane connection
 	controlPlaneClient api.ControlPlaneClient
 	controlPlaneConn   *grpc.ClientConn
@@ -63,16 +66,20 @@ type MessageBoardServer struct {
 	responsibilityLock       sync.RWMutex
 	lastResponsibilityUpdate time.Time
 	controlPlaneAvailable    bool
+
+	// Chain topology info
+	isHead bool
+	isTail bool
 }
 
 // SubscriptionInfo stores information about a subscription token
 type SubscriptionInfo struct {
-	UserID   int64
-	TopicIDs []int64
+	UserID  int64
+	TopicID int64 // Single topic per token
 }
 
 // NewMessageBoardServer creates a new server instance
-func NewMessageBoardServer(nodeID, address string, nextAddress string) *MessageBoardServer {
+func NewMessageBoardServer(nodeID, address string, nextAddress string, isHead, isTail bool) *MessageBoardServer {
 	return &MessageBoardServer{
 		userStorage:         *storage.NewUserStorage(),
 		topicStorage:        *storage.NewTopicStorage(),
@@ -86,6 +93,8 @@ func NewMessageBoardServer(nodeID, address string, nextAddress string) *MessageB
 		address:             address,
 		nextAddress:         nextAddress,
 		eventCounter:        0,
+		isHead:              isHead,
+		isTail:              isTail,
 	}
 }
 
@@ -499,21 +508,26 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessa
 
 // GetSubscriptionNode returns a node to which a subscription can be opened
 func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.SubscriptionNodeRequest) (*api.SubscriptionNodeResponse, error) {
+	// Only head can assign subscriptions
+	if !s.isHead {
+		return nil, status.Errorf(codes.PermissionDenied, "subscription assignment only allowed on head")
+	}
+
 	// Generate subscription token
 	token := generateToken()
 
-	// Store subscription info
+	// Store subscription info - ONE token for ONE topic
 	s.tokensLock.Lock()
 	s.subscriptionTokens[token] = &SubscriptionInfo{
-		UserID:   req.UserId,
-		TopicIDs: req.TopicId,
+		UserID:  req.UserId,
+		TopicID: req.TopicId,
 	}
 	s.tokensLock.Unlock()
 
-	log.Printf("Generated subscription token for user %d: %s", req.UserId, token)
+	log.Printf("Generated subscription token for user %d, topic %d: %s", req.UserId, req.TopicId, token)
 
-	// Determine which node should handle this subscription
-	targetNode := s.assignSubscriptionNode(ctx, req.UserId)
+	// Ask control plane to assign a node using round-robin
+	targetNode := s.assignSubscriptionNode(ctx, req.UserId, req.TopicId)
 
 	return &api.SubscriptionNodeResponse{
 		SubscribeToken: token,
@@ -521,8 +535,8 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 	}, nil
 }
 
-// assignSubscriptionNode calculates which node should handle a subscription for a given user
-func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID int64) *api.NodeInfo {
+// assignSubscriptionNode calls control plane for round-robin subscription assignment
+func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID, topicID int64) *api.NodeInfo {
 	// If no control plane, default to this node
 	if s.controlPlaneClient == nil {
 		return &api.NodeInfo{
@@ -531,51 +545,24 @@ func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID 
 		}
 	}
 
-	// Query control plane for node assignments
-	resp, err := s.controlPlaneClient.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
+	// Ask control plane to assign a node using round-robin
+	resp, err := s.controlPlaneClient.AssignSubscriptionNode(ctx, &api.AssignSubscriptionNodeRequest{
+		UserId:  userID,
+		TopicId: topicID,
+	})
 	if err != nil {
-		log.Printf("Failed to get subscription assignments: %v (using cached assignments)", err)
-		// Use cached assignments (may be stale)
-		s.responsibilityLock.RLock()
-		staleness := time.Since(s.lastResponsibilityUpdate)
-		if staleness > 60*time.Second {
-			log.Printf("Warning: cached assignments stale for %.0fs", staleness.Seconds())
-		}
-		s.responsibilityLock.RUnlock()
-
-		// Fallback to this node if no cached info
+		log.Printf("Failed to get subscription assignment from control plane: %v (using this node)", err)
+		// Fallback to this node
 		return &api.NodeInfo{
 			NodeId:  s.nodeID,
 			Address: s.address,
 		}
 	}
 
-	totalNodes := int32(len(resp.Assignments))
-	if totalNodes == 0 {
-		// No nodes registered, use this one
-		return &api.NodeInfo{
-			NodeId:  s.nodeID,
-			Address: s.address,
-		}
-	}
+	log.Printf("Control plane assigned subscription (user=%d, topic=%d) to node %s",
+		userID, topicID, resp.Node.NodeId)
 
-	// Calculate target modulo index
-	targetIndex := userID % int64(totalNodes)
-
-	// Find node with matching modulo index
-	for _, assignment := range resp.Assignments {
-		if int64(assignment.ModuloIndex) == targetIndex {
-			log.Printf("Assigned user %d to node %s (index %d of %d)", userID, assignment.Node.NodeId, targetIndex, totalNodes)
-			return assignment.Node
-		}
-	}
-
-	// Fallback (shouldn't happen if control plane is working correctly)
-	log.Printf("Warning: no node found for user %d, falling back to self", userID)
-	return &api.NodeInfo{
-		NodeId:  s.nodeID,
-		Address: s.address,
-	}
+	return resp.Node
 }
 
 // ListTopics returns all topics
@@ -667,7 +654,12 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 		return status.Errorf(codes.PermissionDenied, "token does not match user ID")
 	}
 
-	log.Printf("Subscription stream started for user %d topics: %v", req.UserId, req.TopicId)
+	// Verify topic matches the token
+	if subInfo.TopicID != req.TopicId {
+		return status.Errorf(codes.PermissionDenied, "token does not match topic ID")
+	}
+
+	log.Printf("Subscription stream started for user %d topic: %d", req.UserId, req.TopicId)
 
 	// Create subscription channel
 	eventChan := make(chan *api.MessageEvent, 100)
@@ -677,33 +669,29 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 	s.subscribers[token] = eventChan
 	s.subscribersLock.Unlock()
 
-	// Register subscriptions
+	// Register subscription
 	var ret struct{}
-	for _, topicID := range req.TopicId {
-		s.subscriptionStorage.CreateSubscription(req.UserId, topicID, &ret)
-	}
+	s.subscriptionStorage.CreateSubscription(req.UserId, req.TopicId, &ret)
 
 	// Send historical messages if requested
 	if req.FromMessageId > 0 {
-		for _, topicID := range req.TopicId {
-			var messages []*api.Message
-			if err := s.messageStorage.ReadMessages(topicID, &messages); err == nil {
-				for _, msg := range messages {
-					if msg.Id >= req.FromMessageId {
-						// Update like count
-						var likeCount int64
-						s.likeStorage.ReadLikes(msg.Id, &likeCount)
-						msg.Likes = int32(likeCount)
+		var messages []*api.Message
+		if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err == nil {
+			for _, msg := range messages {
+				if msg.Id >= req.FromMessageId {
+					// Update like count
+					var likeCount int64
+					s.likeStorage.ReadLikes(msg.Id, &likeCount)
+					msg.Likes = int32(likeCount)
 
-						event := &api.MessageEvent{
-							SequenceNumber: atomic.AddInt64(&s.sequenceCounter, 1),
-							Op:             api.OpType_OP_POST,
-							Message:        msg,
-							EventAt:        msg.CreatedAt,
-						}
-						if err := stream.Send(event); err != nil {
-							return err
-						}
+					event := &api.MessageEvent{
+						SequenceNumber: atomic.AddInt64(&s.sequenceCounter, 1),
+						Op:             api.OpType_OP_POST,
+						Message:        msg,
+						EventAt:        msg.CreatedAt,
+					}
+					if err := stream.Send(event); err != nil {
+						return err
 					}
 				}
 			}
@@ -749,26 +737,21 @@ func (s *MessageBoardServer) broadcastEvent(event *api.MessageEvent, topicID int
 			continue
 		}
 
-		subscribed := false
-		for _, tID := range subInfo.TopicIDs {
-			if tID == topicID {
-				subscribed = true
-				break
-			}
+		// Check if topic matches (single topic per token)
+		if subInfo.TopicID != topicID {
+			continue
 		}
 
-		if subscribed {
-			// Check if this node is responsible for this user's broadcasts
-			if !s.isResponsibleForUser(subInfo.UserID) {
-				continue
-			}
+		// Check if this node is responsible for this user's broadcasts
+		if !s.isResponsibleForUser(subInfo.UserID) {
+			continue
+		}
 
-			select {
-			case eventChan <- event:
-			case <-time.After(100 * time.Millisecond):
-				// Skip if channel is full
-				log.Printf("Skipping event for slow subscriber")
-			}
+		select {
+		case eventChan <- event:
+		case <-time.After(100 * time.Millisecond):
+			// Skip if channel is full
+			log.Printf("Skipping event for slow subscriber")
 		}
 	}
 }
@@ -1219,13 +1202,17 @@ func StartServer(id string, url string, nextAddress string, controlPlaneAddr str
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
+	// Determine if we're head or tail based on topology
+	isHead := (nextAddress != "")
+	isTail := (nextAddress == "")
+
 	grpcServer := grpc.NewServer()
-	server := NewMessageBoardServer(id, url, nextAddress)
+	server := NewMessageBoardServer(id, url, nextAddress, isHead, isTail)
 
 	api.RegisterMessageBoardServer(grpcServer, server)
 	api.RegisterReplicationServiceServer(grpcServer, server)
 
-	log.Printf("Server listening on %s", url)
+	log.Printf("Server listening on %s (head: %v, tail: %v)", url, isHead, isTail)
 
 	if nextAddress != "" {
 		conn, err := grpc.NewClient(nextAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -1244,10 +1231,6 @@ func StartServer(id string, url string, nextAddress string, controlPlaneAddr str
 		}
 		server.controlPlaneConn = conn
 		server.controlPlaneClient = api.NewControlPlaneClient(conn)
-
-		// Determine if we're head or tail
-		isHead := (nextAddress != "")
-		isTail := (nextAddress == "")
 
 		// Register with control plane and start heartbeat
 		go server.registerAndHeartbeat(isHead, isTail)
