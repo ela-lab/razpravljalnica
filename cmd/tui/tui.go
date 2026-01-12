@@ -18,7 +18,8 @@ import (
 
 type TUIApp struct {
 	app         *tview.Application
-	service     *client.ClientService
+	service     *client.ClientService // Head node (for writes and subscription assignment)
+	subService  *client.ClientService // Subscription node (for streaming)
 	currentUser int64
 	mainLayout  tview.Primitive
 
@@ -47,17 +48,18 @@ type TUIApp struct {
 }
 
 func RunTUI(url string) error {
-	fmt.Printf("Connecting to %s...\n", url)
+	fmt.Printf("Connecting to head node at %s...\n", url)
 
 	service, err := client.NewClientService(url, 10*time.Second)
 	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+		return fmt.Errorf("failed to connect to head: %w", err)
 	}
 	defer service.Close()
 
 	tui := &TUIApp{
 		app:              tview.NewApplication(),
-		service:          service,
+		service:          service, // Head node for writes
+		subService:       nil,     // Will be set after GetSubscriptionNode
 		userNames:        make(map[int64]string),
 		subscribedTopics: make(map[int64]bool),
 		likedMessages:    make(map[int64]bool),
@@ -644,6 +646,11 @@ End         - Re-enable auto-scroll in messages
 5. Press E on your own message to edit it
 6. Type your message and press Enter to send
 7. Subscription Feed (first topic) shows messages from all subscribed topics
+
+[yellow]Chain Replication:[white]
+- Connected to HEAD node for writes
+- Subscriptions assigned to nodes by HEAD
+- Real-time events streamed from assigned node
 `
 
 	textView := tview.NewTextView().
@@ -675,14 +682,34 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 	ctx, cancel := context.WithCancel(ctx)
 	t.subCancel = cancel
 
-	token, _, err := t.service.GetSubscriptionNode(t.currentUser, topicIDs)
+	// Get subscription node assignment from head
+	token, nodeInfo, err := t.service.GetSubscriptionNode(t.currentUser, topicIDs)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Subscription error: %v[white]", err))
 		return
 	}
 
+	// Connect to assigned subscription node if different from current
+	if nodeInfo != nil && nodeInfo.Address != "" {
+		// Close previous subscription connection if exists
+		if t.subService != nil && t.subService != t.service {
+			t.subService.Close()
+		}
+
+		// Create new connection to assigned node
+		subService, err := client.NewClientService(nodeInfo.Address, 10*time.Second)
+		if err != nil {
+			t.showStatus(fmt.Sprintf("[red]Failed to connect to subscription node %s: %v[white]", nodeInfo.Address, err))
+			return
+		}
+		t.subService = subService
+	} else {
+		// No node info returned, use head for subscriptions
+		t.subService = t.service
+	}
+
 	go func() {
-		err := t.service.StreamSubscription(ctx, t.currentUser, topicIDs, token, 0, func(event *api.MessageEvent) error {
+		err := t.subService.StreamSubscription(ctx, t.currentUser, topicIDs, token, 0, func(event *api.MessageEvent) error {
 			// Resolve sender name if unknown
 			t.ensureUserName(event.Message.UserId)
 
