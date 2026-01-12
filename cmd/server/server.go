@@ -693,6 +693,32 @@ func generateToken() string {
 	return hex.EncodeToString(b)
 }
 
+// createEventFromReplication creates a MessageEvent from a ReplicationRequest
+func (s *MessageBoardServer) createEventFromReplication(req *api.ReplicationRequest) *api.MessageEvent {
+	// Only message operations generate events for subscribers
+	if req.Message == nil {
+		return nil
+	}
+
+	return &api.MessageEvent{
+		SequenceNumber: req.SequenceNumber,
+		Op:             req.Op,
+		Message:        req.Message,
+		EventAt:        req.Message.CreatedAt,
+	}
+}
+
+// extractTopicIDFromReplication extracts the topic ID from a ReplicationRequest
+func (s *MessageBoardServer) extractTopicIDFromReplication(req *api.ReplicationRequest) int64 {
+	if req.Topic != nil {
+		return req.Topic.Id
+	}
+	if req.Message != nil {
+		return req.Message.TopicId
+	}
+	return 0
+}
+
 func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.ReplicationRequest) (*api.ReplicationResponse, error) {
 	var ret struct{}
 	now := time.Now().Format("15:04:05.000") // HH:MM:SS.mmm
@@ -748,18 +774,35 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 
 	atomic.StoreInt64(&s.sequenceCounter, req.SequenceNumber)
 
+	// Forward to next node and wait for ACK
+	var resp *api.ReplicationResponse
+	var err error
 	if s.nextReplica != nil {
-		resp, err := s.nextReplica.ReplicateOperation(ctx, req)
+		resp, err = s.nextReplica.ReplicateOperation(ctx, req)
 		if err != nil {
 			return nil, err
 		}
 		now = time.Now().Format("15:04:05.000")
 		log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
-		return resp, nil
+	} else {
+		// Tail node: return ACK immediately
+		now = time.Now().Format("15:04:05.000")
+		log.Printf("[%s] [Node %s] Tail processed sequence %d, sending ack", now, s.nodeID, req.SequenceNumber)
+		resp = &api.ReplicationResponse{AckSequenceNumber: req.SequenceNumber}
 	}
-	now = time.Now().Format("15:04:05.000")
-	log.Printf("[%s] [Node %s] Tail processed sequence %d, sending ack", now, s.nodeID, req.SequenceNumber)
-	return &api.ReplicationResponse{AckSequenceNumber: req.SequenceNumber}, nil
+
+	// ACK received (or we are tail) - broadcast to local subscribers
+	event := s.createEventFromReplication(req)
+	if event != nil {
+		topicID := s.extractTopicIDFromReplication(req)
+		if topicID > 0 {
+			s.broadcastEvent(event, topicID)
+			now = time.Now().Format("15:04:05.000")
+			log.Printf("[%s] [Node %s] Broadcasted event to local subscribers (topic: %d)", now, s.nodeID, topicID)
+		}
+	}
+
+	return resp, nil
 }
 
 
