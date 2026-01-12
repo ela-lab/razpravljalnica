@@ -1,0 +1,273 @@
+=== RUN   TestBackwardBroadcastFlow
+    broadcast_behavior_test.go:44: [1] Head: Receives PostMessage request
+    broadcast_behavior_test.go:44: [2] Head: Calls ReplicateOperation on Middle
+    broadcast_behavior_test.go:44: [3] Middle: Receives replication request
+    broadcast_behavior_test.go:44: [4] Middle: Calls ReplicateOperation on Tail
+    broadcast_behavior_test.go:44: [5] Tail: Receives replication request
+    broadcast_behavior_test.go:44: [6] Tail: Stores message (no broadcast - tail doesn't broadcast)
+    broadcast_behavior_test.go:44: [7] Tail: Returns ReplicationResponse with ACK
+    broadcast_behavior_test.go:44: [8] Middle: Receives ACK from Tail
+    broadcast_behavior_test.go:44: [9] Middle: Broadcasts event to local subscribers (filtered)
+    broadcast_behavior_test.go:44: [10] Middle: Returns ACK to Head
+    broadcast_behavior_test.go:44: [11] Head: Receives ACK from Middle
+    broadcast_behavior_test.go:44: [12] Head: Broadcasts event to local subscribers (filtered)
+    broadcast_behavior_test.go:59: ✓ Backward broadcast flow validates: events propagate post-ACK
+--- PASS: TestBackwardBroadcastFlow (0.00s)
+=== RUN   TestBroadcastWithoutACK
+    broadcast_behavior_test.go:81: ✓ Correctly identified: Broadcasting at 5ms is too early (ACK at 10ms)
+    broadcast_behavior_test.go:89: ✓ Broadcasting after ACK ensures data is committed
+--- PASS: TestBroadcastWithoutACK (0.00s)
+=== RUN   TestSequenceNumberMonotonicity
+    broadcast_behavior_test.go:131: ✓ All sequence numbers unique and monotonic
+--- PASS: TestSequenceNumberMonotonicity (0.00s)
+=== RUN   TestEventFidelity
+    broadcast_behavior_test.go:173: ✓ Message data preserved through replication and broadcast
+--- PASS: TestEventFidelity (0.00s)
+=== RUN   TestBroadcastDeliveryGuarantees
+    broadcast_behavior_test.go:204: ✗ User 1 not responsible for this node, skip
+    broadcast_behavior_test.go:204: ✗ User 4 not responsible for this node, skip
+    broadcast_behavior_test.go:204: ✗ User 7 not responsible for this node, skip
+--- PASS: TestBroadcastDeliveryGuarantees (0.00s)
+=== RUN   TestEventFanout
+    broadcast_behavior_test.go:237: Message 100 not for user 4 (responsible node: 1)
+    broadcast_behavior_test.go:237: Message 100 not for user 7 (responsible node: 1)
+    broadcast_behavior_test.go:237: Message 100 not for user 10 (responsible node: 1)
+    broadcast_behavior_test.go:237: Message 100 not for user 1 (responsible node: 1)
+    broadcast_behavior_test.go:241: Fanout result: 0 delivered, 4 not responsible
+--- PASS: TestEventFanout (0.00s)
+=== RUN   TestNoDoubleDelivery
+    broadcast_behavior_test.go:262: Node 0 skips (not responsible for user 5)
+    broadcast_behavior_test.go:262: Node 1 skips (not responsible for user 5)
+    broadcast_behavior_test.go:260: Node 2 broadcasts (responsible for user 5)
+    broadcast_behavior_test.go:270: ✓ No double delivery - exactly one responsible node broadcasts
+--- PASS: TestNoDoubleDelivery (0.00s)
+=== RUN   TestBroadcastToMultipleTopics
+    broadcast_behavior_test.go:310: ✓ Multi-topic subscription filtering works
+--- PASS: TestBroadcastToMultipleTopics (0.00s)
+=== RUN   TestEventCancellation
+    broadcast_behavior_test.go:334: ✓ Subscriber cleanup works
+--- PASS: TestEventCancellation (0.00s)
+=== RUN   TestSlowSubscriberHandling
+    broadcast_behavior_test.go:356: ✓ Fast subscriber received event
+    broadcast_behavior_test.go:366: ⚠ Slow subscriber skipped (channel full)
+    broadcast_behavior_test.go:369: ✓ Slow subscriber doesn't block fast subscribers
+--- PASS: TestSlowSubscriberHandling (0.10s)
+=== RUN   TestMessageOrdering
+    broadcast_behavior_test.go:395: ✓ Events ordered by sequence number
+--- PASS: TestMessageOrdering (0.00s)
+=== RUN   TestBroadcastLatency
+    broadcast_behavior_test.go:413: ✓ Broadcast latency acceptable: 5ms
+--- PASS: TestBroadcastLatency (0.00s)
+=== RUN   TestControlPlaneNodeRegistration
+    controlplane_unit_test.go:32: Requires control plane implementation available
+--- SKIP: TestControlPlaneNodeRegistration (0.00s)
+=== RUN   TestControlPlaneResponsibilityAssignment
+=== RUN   TestControlPlaneResponsibilityAssignment/single_node_takes_all_users
+=== RUN   TestControlPlaneResponsibilityAssignment/user_0_goes_to_node_0
+=== RUN   TestControlPlaneResponsibilityAssignment/user_1_goes_to_node_1
+=== RUN   TestControlPlaneResponsibilityAssignment/user_3_wraps_around_to_node_0
+=== RUN   TestControlPlaneResponsibilityAssignment/user_10_with_5_nodes
+=== RUN   TestControlPlaneResponsibilityAssignment/user_17_with_5_nodes
+=== RUN   TestControlPlaneResponsibilityAssignment/large_user_ID
+--- PASS: TestControlPlaneResponsibilityAssignment (0.00s)
+    --- PASS: TestControlPlaneResponsibilityAssignment/single_node_takes_all_users (0.00s)
+    --- PASS: TestControlPlaneResponsibilityAssignment/user_0_goes_to_node_0 (0.00s)
+    --- PASS: TestControlPlaneResponsibilityAssignment/user_1_goes_to_node_1 (0.00s)
+    --- PASS: TestControlPlaneResponsibilityAssignment/user_3_wraps_around_to_node_0 (0.00s)
+    --- PASS: TestControlPlaneResponsibilityAssignment/user_10_with_5_nodes (0.00s)
+    --- PASS: TestControlPlaneResponsibilityAssignment/user_17_with_5_nodes (0.00s)
+    --- PASS: TestControlPlaneResponsibilityAssignment/large_user_ID (0.00s)
+=== RUN   TestControlPlaneConsistentNodeOrdering
+--- PASS: TestControlPlaneConsistentNodeOrdering (0.00s)
+=== RUN   TestControlPlaneHealthCheck
+    controlplane_unit_test.go:135: Requires full control plane implementation
+--- SKIP: TestControlPlaneHealthCheck (0.00s)
+=== RUN   TestControlPlaneMultipleNodeRegistrations
+    controlplane_unit_test.go:145: Requires full control plane implementation
+--- SKIP: TestControlPlaneMultipleNodeRegistrations (0.00s)
+=== RUN   TestControlPlaneResponsibilityDistribution
+    controlplane_unit_test.go:170: Distribution across 10 nodes: map[0:100 1:100 2:100 3:100 4:100 5:100 6:100 7:100 8:100 9:100]
+--- PASS: TestControlPlaneResponsibilityDistribution (0.00s)
+=== RUN   TestResponsibilityIndexCalculation
+=== RUN   TestResponsibilityIndexCalculation/node1
+=== RUN   TestResponsibilityIndexCalculation/node2
+=== RUN   TestResponsibilityIndexCalculation/node3
+--- PASS: TestResponsibilityIndexCalculation (0.00s)
+    --- PASS: TestResponsibilityIndexCalculation/node1 (0.00s)
+    --- PASS: TestResponsibilityIndexCalculation/node2 (0.00s)
+    --- PASS: TestResponsibilityIndexCalculation/node3 (0.00s)
+=== RUN   TestSingleNodeWithoutControlPlane
+    distributed_integration_test.go:21: Head node server running on port 43337 without control plane
+    distributed_integration_test.go:22: Tail node server running on port 44957 without control plane
+--- PASS: TestSingleNodeWithoutControlPlane (1.01s)
+=== RUN   TestNodeRegistrationFlow
+    distributed_integration_test.go:32: Requires running control plane
+--- SKIP: TestNodeRegistrationFlow (0.00s)
+=== RUN   TestResponsibilitySyncFrequency
+    distributed_integration_test.go:44: Requires timing measurement
+--- SKIP: TestResponsibilitySyncFrequency (0.00s)
+=== RUN   TestBroadcastFiltering
+    distributed_integration_test.go:77: Node 2 responsible for users: [2 5 8]
+    distributed_integration_test.go:77: Node 0 responsible for users: [0 3 6]
+    distributed_integration_test.go:77: Node 1 responsible for users: [1 4 7]
+--- PASS: TestBroadcastFiltering (0.00s)
+=== RUN   TestSubscriptionDelegationToCorrectNode
+=== RUN   TestSubscriptionDelegationToCorrectNode/user_1_with_3_nodes
+=== RUN   TestSubscriptionDelegationToCorrectNode/user_5_with_3_nodes
+--- PASS: TestSubscriptionDelegationToCorrectNode (0.00s)
+    --- PASS: TestSubscriptionDelegationToCorrectNode/user_1_with_3_nodes (0.00s)
+    --- PASS: TestSubscriptionDelegationToCorrectNode/user_5_with_3_nodes (0.00s)
+=== RUN   TestTokenStorageOnAllNodes
+--- PASS: TestTokenStorageOnAllNodes (0.00s)
+=== RUN   TestBackwardEventBroadcasting
+    distributed_integration_test.go:166: Backward broadcast flow has 9 steps
+    distributed_integration_test.go:168:   1. Head receives PostMessage
+    distributed_integration_test.go:168:   2. Head replicates to Middle
+    distributed_integration_test.go:168:   3. Middle replicates to Tail
+    distributed_integration_test.go:168:   4. Tail sends ACK back
+    distributed_integration_test.go:168:   5. Middle receives ACK
+    distributed_integration_test.go:168:   6. Middle broadcasts (filtered)
+    distributed_integration_test.go:168:   7. Middle sends ACK back to Head
+    distributed_integration_test.go:168:   8. Head receives ACK
+    distributed_integration_test.go:168:   9. Head broadcasts (filtered)
+--- PASS: TestBackwardEventBroadcasting (0.00s)
+=== RUN   TestMultipleSubscriptionsSameUser
+--- PASS: TestMultipleSubscriptionsSameUser (0.00s)
+=== RUN   TestConcurrentSubscriptions
+    distributed_integration_test.go:218: Concurrent subscriptions assigned: map[0:20 1:20 2:20 3:20 4:20]
+--- PASS: TestConcurrentSubscriptions (0.00s)
+=== RUN   TestLoadBalanceAcrossNodes
+    distributed_integration_test.go:245: Load distribution (expected ~250 per node): map[0:250 1:250 2:250 3:250]
+--- PASS: TestLoadBalanceAcrossNodes (0.00s)
+=== RUN   TestEventOrdering
+--- PASS: TestEventOrdering (0.00s)
+=== RUN   TestSubscriptionStreamContinuity
+--- PASS: TestSubscriptionStreamContinuity (0.00s)
+=== RUN   TestTokenValidation
+--- PASS: TestTokenValidation (0.00s)
+=== RUN   TestHistoricalMessageDelivery
+--- PASS: TestHistoricalMessageDelivery (0.00s)
+=== RUN   TestDistributedSubscriptions
+    distributed_subscriptions_test.go:41: Full integration test - requires control plane coordination. Chain reconstruction features implemented in control plane and servers.
+--- SKIP: TestDistributedSubscriptions (0.00s)
+=== RUN   TestNodeFailureDetection
+    failure_scenarios_test.go:21: Requires timing and process management
+--- SKIP: TestNodeFailureDetection (0.00s)
+=== RUN   TestControlPlaneUnavailabilityFallback
+    failure_scenarios_test.go:39: Requires control plane simulation
+--- SKIP: TestControlPlaneUnavailabilityFallback (0.00s)
+=== RUN   TestCachedResponsibilityAssignments
+--- PASS: TestCachedResponsibilityAssignments (0.00s)
+=== RUN   TestStaleAssignmentWarnings
+=== RUN   TestStaleAssignmentWarnings/5_seconds_old_-_no_warning
+=== RUN   TestStaleAssignmentWarnings/35_seconds_old_-_warning
+=== RUN   TestStaleAssignmentWarnings/65_seconds_old_-_alert
+--- PASS: TestStaleAssignmentWarnings (0.00s)
+    --- PASS: TestStaleAssignmentWarnings/5_seconds_old_-_no_warning (0.00s)
+    --- PASS: TestStaleAssignmentWarnings/35_seconds_old_-_warning (0.00s)
+    --- PASS: TestStaleAssignmentWarnings/65_seconds_old_-_alert (0.00s)
+=== RUN   TestResponsibilityRecalculationOnNodeRemoval
+    failure_scenarios_test.go:149: User 5 reassigned from node 2 to node 1
+--- PASS: TestResponsibilityRecalculationOnNodeRemoval (0.00s)
+=== RUN   TestNodeRestartRecovery
+    failure_scenarios_test.go:164: Requires process restart simulation
+--- SKIP: TestNodeRestartRecovery (0.00s)
+=== RUN   TestNetworkPartition
+    failure_scenarios_test.go:183: Requires network isolation
+--- SKIP: TestNetworkPartition (0.00s)
+=== RUN   TestControlPlaneBackup
+    failure_scenarios_test.go:194: Not yet implemented
+--- SKIP: TestControlPlaneBackup (0.00s)
+=== RUN   TestGracefulDegradation
+    failure_scenarios_test.go:215: With 2 nodes, each node handles ~45 users
+--- PASS: TestGracefulDegradation (0.00s)
+=== RUN   TestSubscriptionReliabilityUnderFailure
+    failure_scenarios_test.go:233: Subscription replication not yet implemented
+--- SKIP: TestSubscriptionReliabilityUnderFailure (0.00s)
+=== RUN   TestBroadcastConsistency
+--- PASS: TestBroadcastConsistency (0.00s)
+=== RUN   TestRecoveryFromPartialFailure
+    failure_scenarios_test.go:270: Requires integration with control plane
+--- SKIP: TestRecoveryFromPartialFailure (0.00s)
+=== RUN   TestConcurrentNodeFailures
+    failure_scenarios_test.go:281: Requires failure simulation
+--- SKIP: TestConcurrentNodeFailures (0.00s)
+=== RUN   TestHeartbeatTimeout
+=== RUN   TestHeartbeatTimeout/one_missed_heartbeat_(3_sec_old)
+=== RUN   TestHeartbeatTimeout/two_missed_heartbeats_(10_sec_old)
+=== RUN   TestHeartbeatTimeout/three_missed_heartbeats_(15_sec_old)
+--- PASS: TestHeartbeatTimeout (0.00s)
+    --- PASS: TestHeartbeatTimeout/one_missed_heartbeat_(3_sec_old) (0.00s)
+    --- PASS: TestHeartbeatTimeout/two_missed_heartbeats_(10_sec_old) (0.00s)
+    --- PASS: TestHeartbeatTimeout/three_missed_heartbeats_(15_sec_old) (0.00s)
+=== RUN   TestResponsibilityIndexStability
+    failure_scenarios_test.go:342: Modulo assignment provides simple logic at cost of churn on failures
+--- PASS: TestResponsibilityIndexStability (0.00s)
+=== RUN   TestHeartbeatContinuityDuringLoad
+    failure_scenarios_test.go:367: Heartbeat goroutine should run independent of request load
+--- PASS: TestHeartbeatContinuityDuringLoad (0.00s)
+=== RUN   TestResponsibilityUpdateFrequency
+    failure_scenarios_test.go:384: Expected 10 responsibility syncs over 30 seconds
+--- PASS: TestResponsibilityUpdateFrequency (0.00s)
+=== RUN   TestUserCreation
+--- PASS: TestUserCreation (1.03s)
+=== RUN   TestTopicCreation
+--- PASS: TestTopicCreation (1.02s)
+=== RUN   TestMessageLifecycle
+--- PASS: TestMessageLifecycle (1.04s)
+=== RUN   TestLikeMessage
+--- PASS: TestLikeMessage (1.03s)
+=== RUN   TestUnauthorizedOperations
+--- PASS: TestUnauthorizedOperations (1.03s)
+=== RUN   TestNonExistentResources
+--- PASS: TestNonExistentResources (1.01s)
+=== RUN   TestSubscription
+    integration_test.go:430: Successfully received subscription event for message 1
+    integration_test.go:408: Subscription ended: rpc error: code = Canceled desc = context canceled
+--- PASS: TestSubscription (1.52s)
+=== RUN   TestMultipleTopicSubscription
+    integration_test.go:493: Received message for topic 1: Message to topic 1
+    integration_test.go:493: Received message for topic 2: Message to topic 2
+--- PASS: TestMultipleTopicSubscription (1.53s)
+=== RUN   TestConcurrentOperations
+--- PASS: TestConcurrentOperations (1.02s)
+=== RUN   TestIsResponsibleForUser
+=== RUN   TestIsResponsibleForUser/user_0_responsible_for_node_0_with_3_nodes
+=== RUN   TestIsResponsibleForUser/user_1_not_responsible_for_node_0_with_3_nodes
+=== RUN   TestIsResponsibleForUser/user_1_responsible_for_node_1_with_3_nodes
+=== RUN   TestIsResponsibleForUser/user_10_responsible_for_node_0_with_5_nodes_(10_%_5_=_0)
+=== RUN   TestIsResponsibleForUser/user_17_responsible_for_node_2_with_5_nodes_(17_%_5_=_2)
+=== RUN   TestIsResponsibleForUser/single_node_responsible_for_all
+=== RUN   TestIsResponsibleForUser/large_user_ID
+--- PASS: TestIsResponsibleForUser (0.00s)
+    --- PASS: TestIsResponsibleForUser/user_0_responsible_for_node_0_with_3_nodes (0.00s)
+    --- PASS: TestIsResponsibleForUser/user_1_not_responsible_for_node_0_with_3_nodes (0.00s)
+    --- PASS: TestIsResponsibleForUser/user_1_responsible_for_node_1_with_3_nodes (0.00s)
+    --- PASS: TestIsResponsibleForUser/user_10_responsible_for_node_0_with_5_nodes_(10_%_5_=_0) (0.00s)
+    --- PASS: TestIsResponsibleForUser/user_17_responsible_for_node_2_with_5_nodes_(17_%_5_=_2) (0.00s)
+    --- PASS: TestIsResponsibleForUser/single_node_responsible_for_all (0.00s)
+    --- PASS: TestIsResponsibleForUser/large_user_ID (0.00s)
+=== RUN   TestNodesResponsibleForAllUsers
+--- PASS: TestNodesResponsibleForAllUsers (0.00s)
+=== RUN   TestNoOverlapInResponsibility
+--- PASS: TestNoOverlapInResponsibility (0.00s)
+=== RUN   TestResponsibilityChangesOnNodeAdd
+--- PASS: TestResponsibilityChangesOnNodeAdd (0.00s)
+=== RUN   TestLargeNodeCounts
+--- PASS: TestLargeNodeCounts (0.00s)
+=== RUN   TestResponsibilityConsistency
+--- PASS: TestResponsibilityConsistency (0.00s)
+=== RUN   TestSubscriptionNodeAssignmentLogic
+=== RUN   TestSubscriptionNodeAssignmentLogic/node1
+=== RUN   TestSubscriptionNodeAssignmentLogic/node2
+=== RUN   TestSubscriptionNodeAssignmentLogic/node3
+=== RUN   TestSubscriptionNodeAssignmentLogic/node1#01
+=== RUN   TestSubscriptionNodeAssignmentLogic/node2#01
+--- PASS: TestSubscriptionNodeAssignmentLogic (0.00s)
+    --- PASS: TestSubscriptionNodeAssignmentLogic/node1 (0.00s)
+    --- PASS: TestSubscriptionNodeAssignmentLogic/node2 (0.00s)
+    --- PASS: TestSubscriptionNodeAssignmentLogic/node3 (0.00s)
+    --- PASS: TestSubscriptionNodeAssignmentLogic/node1#01 (0.00s)
+    --- PASS: TestSubscriptionNodeAssignmentLogic/node2#01 (0.00s)
+PASS
+ok  	github.com/ela-lab/razpravljalnica/tests	11.360s

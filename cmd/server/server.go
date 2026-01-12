@@ -910,7 +910,7 @@ func (s *MessageBoardServer) syncResponsibility() {
 // UpdateChainTopology handles chain reconfiguration from control plane
 func (s *MessageBoardServer) UpdateChainTopology(ctx context.Context, req *api.UpdateChainTopologyRequest) (*emptypb.Empty, error) {
 	now := time.Now().Format("15:04:05.000")
-	log.Printf("[%s] [Node %s] Received chain topology update: prev=%s, next=%s, head=%v, tail=%v", 
+	log.Printf("[%s] [Node %s] Received chain topology update: prev=%s, next=%s, head=%v, tail=%v",
 		now, s.nodeID, req.NewPrevAddress, req.NewNextAddress, req.IsHead, req.IsTail)
 
 	// Close existing next replica connection if any

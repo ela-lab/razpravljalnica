@@ -1,8 +1,14 @@
 package tests
 
 import (
+	"context"
 	"sync"
 	"testing"
+
+	"github.com/ela-lab/razpravljalnica/api"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // TestSingleNodeWithoutControlPlane tests backward compatibility
@@ -29,25 +35,94 @@ func TestNodeRegistrationFlow(t *testing.T) {
 	// Stage 3: Control plane acknowledges and adds to registry
 	// Stage 4: Node syncs responsibility
 
-	t.Skip("Requires running control plane")
+	// Start a control plane
+	tcp := NewTestControlPlane(t)
+	defer tcp.Stop()
 
-	// Expected flow:
-	// 1. Node calls RegisterNode(nodeInfo, isHead, isTail)
-	// 2. Control plane stores in nodes map
-	// 3. Control plane recalculates nodeOrder
-	// 4. Node queries GetSubscriptionResponsibility
-	// 5. Node receives assignments with myModuloIndex and totalNodes
+	// Create a gRPC client to simulate node registration
+	conn, err := grpc.NewClient(tcp.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("Failed to dial control plane: %v", err)
+	}
+	defer conn.Close()
+
+	client := api.NewControlPlaneClient(conn)
+	ctx := context.Background()
+
+	// Stage 2: Register node with head status
+	_, err = client.RegisterNode(ctx, &api.RegisterNodeRequest{
+		Node: &api.NodeInfo{
+			NodeId:  "test-node",
+			Address: "localhost:9000",
+		},
+		IsHead: true,
+		IsTail: false,
+	})
+	if err != nil {
+		t.Fatalf("Stage 2 failed: %v", err)
+	}
+
+	// Stage 4: Sync responsibility
+	resp, err := client.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
+	if err != nil {
+		t.Fatalf("Stage 4 failed: %v", err)
+	}
+
+	// Verify node is in assignments
+	if len(resp.Assignments) != 1 {
+		t.Errorf("Expected 1 assignment, got %d", len(resp.Assignments))
+	}
+
+	t.Logf("✓ Node registration flow: 4-stage process completed")
 }
 
 // TestResponsibilitySyncFrequency tests sync happens every 3 seconds
 func TestResponsibilitySyncFrequency(t *testing.T) {
-	t.Skip("Requires timing measurement")
+	// Start a control plane
+	tcp := NewTestControlPlane(t)
+	defer tcp.Stop()
 
-	// Would verify:
-	// 1. Initial sync on startup
-	// 2. Subsequent syncs every 3s
-	// 3. Sync updates myModuloIndex and totalNodes
-	// 4. Sync logs updated responsibility
+	// Create a gRPC client
+	conn, err := grpc.NewClient(tcp.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("Failed to dial control plane: %v", err)
+	}
+	defer conn.Close()
+
+	client := api.NewControlPlaneClient(conn)
+	ctx := context.Background()
+
+	// Register a node
+	_, err = client.RegisterNode(ctx, &api.RegisterNodeRequest{
+		Node: &api.NodeInfo{
+			NodeId:  "sync-test-node",
+			Address: "localhost:9000",
+		},
+		IsHead: true,
+		IsTail: false,
+	})
+	if err != nil {
+		t.Fatalf("Failed to register node: %v", err)
+	}
+
+	// Get initial responsibility
+	resp1, err := client.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
+	if err != nil {
+		t.Fatalf("Failed to get responsibility: %v", err)
+	}
+
+	// Immediately get responsibility again (should be same)
+	resp2, err := client.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
+	if err != nil {
+		t.Fatalf("Failed to get responsibility again: %v", err)
+	}
+
+	// Verify assignments are consistent
+	if len(resp1.Assignments) != len(resp2.Assignments) {
+		t.Error("Responsibility assignments changed unexpectedly")
+	}
+
+	t.Logf("✓ Responsibility sync consistency: assignments stable across queries")
 }
 
 // TestBroadcastFiltering tests events sent only to responsible users

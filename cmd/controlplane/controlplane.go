@@ -159,10 +159,10 @@ func (cp *ControlPlaneServer) rebuildNodeOrder() {
 // reconstructChain reconfigures chain topology after node failure
 func (cp *ControlPlaneServer) reconstructChain(failedNodeID string) {
 	log.Printf("Control plane: Reconstructing chain after %s failure", failedNodeID)
-	
+
 	// Find failed node's position in chain
 	var predecessorID, successorID string
-	
+
 	// Build chain order before removal
 	chainOrder := make([]string, 0, len(cp.nodeOrder))
 	for _, nodeID := range cp.nodeOrder {
@@ -170,12 +170,12 @@ func (cp *ControlPlaneServer) reconstructChain(failedNodeID string) {
 			chainOrder = append(chainOrder, nodeID)
 		}
 	}
-	
+
 	if len(chainOrder) == 0 {
 		log.Printf("Control plane: No nodes left in chain after %s failure", failedNodeID)
 		return
 	}
-	
+
 	// Find predecessor and successor
 	for i, nodeID := range cp.nodeOrder {
 		if nodeID == failedNodeID {
@@ -188,10 +188,10 @@ func (cp *ControlPlaneServer) reconstructChain(failedNodeID string) {
 			break
 		}
 	}
-	
+
 	log.Printf("Control plane: Chain reconstruction - failed: %s, predecessor: %s, successor: %s",
 		failedNodeID, predecessorID, successorID)
-	
+
 	// Handle different failure scenarios
 	if predecessorID == "" && successorID == "" {
 		// Only node in chain - nothing to do
@@ -214,7 +214,7 @@ func (cp *ControlPlaneServer) reconstructChain(failedNodeID string) {
 		// Middle node failed - connect predecessor to successor
 		predecessorState, okPred := cp.nodes[predecessorID]
 		successorState, okSucc := cp.nodes[successorID]
-		
+
 		if okPred && okSucc {
 			// Notify predecessor about new successor
 			cp.notifyNodeTopologyChange(
@@ -225,7 +225,7 @@ func (cp *ControlPlaneServer) reconstructChain(failedNodeID string) {
 				predecessorState.IsHead,
 				false,
 			)
-			
+
 			// Notify successor about new predecessor (for sync)
 			cp.notifyNodeTopologyChange(
 				successorID,
@@ -235,7 +235,7 @@ func (cp *ControlPlaneServer) reconstructChain(failedNodeID string) {
 				false,
 				successorState.IsTail,
 			)
-			
+
 			log.Printf("Control plane: Connected %s -> %s (skipping failed %s)",
 				predecessorID, successorID, failedNodeID)
 		}
@@ -249,7 +249,7 @@ func (cp *ControlPlaneServer) notifyNodeTopologyChange(
 ) {
 	log.Printf("Control plane: Notifying %s of topology change (next: %s, prev: %s, head: %v, tail: %v)",
 		nodeID, newNext, newPrev, isHead, isTail)
-	
+
 	// Connect to node
 	conn, err := grpc.NewClient(nodeAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -257,11 +257,11 @@ func (cp *ControlPlaneServer) notifyNodeTopologyChange(
 		return
 	}
 	defer conn.Close()
-	
+
 	client := api.NewReplicationServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	
+
 	req := &api.UpdateChainTopologyRequest{
 		NewNextAddress:  newNext,
 		NewPrevAddress:  newPrev,
@@ -269,13 +269,13 @@ func (cp *ControlPlaneServer) notifyNodeTopologyChange(
 		IsHead:          isHead,
 		IsTail:          isTail,
 	}
-	
+
 	_, err = client.UpdateChainTopology(ctx, req)
 	if err != nil {
 		log.Printf("Control plane: Failed to update topology on %s: %v", nodeID, err)
 		return
 	}
-	
+
 	log.Printf("Control plane: Successfully updated topology on %s", nodeID)
 }
 
@@ -283,19 +283,19 @@ func (cp *ControlPlaneServer) notifyNodeTopologyChange(
 func (cp *ControlPlaneServer) ReportNodeFailure(ctx context.Context, req *api.ReportNodeFailureRequest) (*emptypb.Empty, error) {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
-	
+
 	log.Printf("Control plane: Node %s reports failure of %s", req.ReporterNodeId, req.FailedNodeId)
-	
+
 	// Check if failed node exists
 	if _, exists := cp.nodes[req.FailedNodeId]; exists {
 		// Reconstruct chain
 		cp.reconstructChain(req.FailedNodeId)
-		
+
 		// Remove failed node
 		delete(cp.nodes, req.FailedNodeId)
 		cp.rebuildNodeOrder()
 	}
-	
+
 	return &emptypb.Empty{}, nil
 }
 
@@ -321,10 +321,10 @@ func (cp *ControlPlaneServer) healthCheckLoop() {
 		for _, nodeID := range staleNodes {
 			log.Printf("Control plane: Removing stale node %s (dead for %v)",
 				nodeID, timeout)
-			
+
 			// Reconstruct chain topology
 			cp.reconstructChain(nodeID)
-			
+
 			delete(cp.nodes, nodeID)
 			cp.rebuildNodeOrder()
 		}
