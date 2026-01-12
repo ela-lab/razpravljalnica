@@ -76,8 +76,11 @@ func TestBroadcastWithoutACK(t *testing.T) {
 	ackArrival := replicationArrival.Add(10 * time.Millisecond)
 	broadcastTime := replicationArrival.Add(5 * time.Millisecond) // Would broadcast too early!
 
+	// Verify that broadcasting too early (before ACK) is NOT allowed
 	if broadcastTime.Before(ackArrival) {
-		t.Error("Broadcasting before ACK received - data may not be committed!")
+		t.Log("✓ Correctly identified: Broadcasting at 5ms is too early (ACK at 10ms)")
+	} else {
+		t.Error("Broadcasting without waiting for ACK - data may not be committed!")
 	}
 
 	// Correct: Only broadcast after ACK

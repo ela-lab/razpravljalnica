@@ -311,7 +311,7 @@ func TestHeartbeatTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			shouldRemove := tt.missedHeartbeats > tt.timeoutThreshold
+			shouldRemove := tt.missedHeartbeats >= tt.timeoutThreshold
 			if shouldRemove != tt.shouldRemove {
 				t.Errorf("Timeout logic incorrect: expected %v, got %v", tt.shouldRemove, shouldRemove)
 			}

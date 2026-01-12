@@ -15,10 +15,10 @@ import (
 	"github.com/ela-lab/razpravljalnica/internal/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // MessageBoardServer implements the MessageBoard service
@@ -56,9 +56,9 @@ type MessageBoardServer struct {
 	controlPlaneConn   *grpc.ClientConn
 
 	// Subscription responsibility (modulo-based)
-	myModuloIndex       int32
-	totalNodes          int32
-	responsibilityLock  sync.RWMutex
+	myModuloIndex            int32
+	totalNodes               int32
+	responsibilityLock       sync.RWMutex
 	lastResponsibilityUpdate time.Time
 	controlPlaneAvailable    bool
 }
@@ -119,7 +119,7 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUser
 			return nil, status.Errorf(codes.Internal, "replication failed: %v", err)
 		}
 		now := time.Now().Format("15:04:05.000")
-    	log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
+		log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
 
 		if resp.AckSequenceNumber != seq {
 			return nil, status.Errorf(codes.Internal, "replication out of order")
@@ -529,7 +529,7 @@ func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID 
 			log.Printf("Warning: cached assignments stale for %.0fs", staleness.Seconds())
 		}
 		s.responsibilityLock.RUnlock()
-		
+
 		// Fallback to this node if no cached info
 		return &api.NodeInfo{
 			NodeId:  s.nodeID,
@@ -985,7 +985,6 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 
 	return resp, nil
 }
-
 
 // StartServer starts the gRPC server
 func StartServer(id string, url string, nextAddress string, controlPlaneAddr string) {

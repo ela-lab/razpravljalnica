@@ -7,11 +7,11 @@ import (
 // TestIsResponsibleForUser tests responsibility filtering logic
 func TestIsResponsibleForUser(t *testing.T) {
 	tests := []struct {
-		name           string
-		userID         int64
-		myModuloIndex  int32
-		totalNodes     int32
-		isResponsible  bool
+		name          string
+		userID        int64
+		myModuloIndex int32
+		totalNodes    int32
+		isResponsible bool
 	}{
 		{
 			name:          "user 0 responsible for node 0 with 3 nodes",
@@ -201,9 +201,9 @@ func TestSubscriptionNodeAssignmentLogic(t *testing.T) {
 	}
 
 	tests := []struct {
-		userID        int64
-		expectedNode  string
-		expectedAddr  string
+		userID       int64
+		expectedNode string
+		expectedAddr string
 	}{
 		{userID: 0, expectedNode: "node1", expectedAddr: "localhost:9001"},
 		{userID: 1, expectedNode: "node2", expectedAddr: "localhost:9002"},

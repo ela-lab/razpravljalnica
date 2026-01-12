@@ -175,7 +175,7 @@ func (cp *ControlPlaneServer) healthCheckLoop() {
 
 		// Remove stale nodes
 		for _, nodeID := range staleNodes {
-			log.Printf("Control plane: Removing stale node %s (dead for %v) - updating responsibility distribution", 
+			log.Printf("Control plane: Removing stale node %s (dead for %v) - updating responsibility distribution",
 				nodeID, timeout)
 			delete(cp.nodes, nodeID)
 			cp.rebuildNodeOrder()

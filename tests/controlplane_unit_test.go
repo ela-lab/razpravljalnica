@@ -105,20 +105,20 @@ func TestControlPlaneResponsibilityAssignment(t *testing.T) {
 func TestControlPlaneConsistentNodeOrdering(t *testing.T) {
 	// Create node IDs in random order
 	nodeIDs := []string{"node3", "node1", "node2"}
-	
+
 	// First ordering
 	nodes1 := make([]string, len(nodeIDs))
 	copy(nodes1, nodeIDs)
 	// In real implementation, would sort by ID
-	
+
 	// Second ordering (same nodes, different input order)
 	nodeIDs2 := []string{"node2", "node3", "node1"}
 	nodes2 := make([]string, len(nodeIDs2))
 	copy(nodes2, nodeIDs2)
-	
+
 	// Both should result in consistent ordering: node1, node2, node3
 	// This test validates the principle; actual implementation sorts by nodeID
-	
+
 	if len(nodes1) != len(nodes2) {
 		t.Errorf("Node lists have different lengths")
 	}
@@ -131,7 +131,7 @@ func TestControlPlaneHealthCheck(t *testing.T) {
 	// 2. Heartbeat timestamp tracked
 	// 3. After 10s without heartbeat, node is removed
 	// 4. Responsibility assignments recalculated
-	
+
 	t.Skip("Requires full control plane implementation")
 }
 
@@ -141,7 +141,7 @@ func TestControlPlaneMultipleNodeRegistrations(t *testing.T) {
 	// 1. Multiple nodes can register simultaneously
 	// 2. Race conditions don't cause corruption
 	// 3. Final responsibility assignments are consistent
-	
+
 	t.Skip("Requires full control plane implementation")
 }
 
@@ -149,24 +149,24 @@ func TestControlPlaneMultipleNodeRegistrations(t *testing.T) {
 func TestControlPlaneResponsibilityDistribution(t *testing.T) {
 	nodeCount := 10
 	userCount := 1000
-	
+
 	// Track how many users assigned to each node
 	assignments := make(map[int]int)
-	
+
 	for userID := 0; userID < userCount; userID++ {
 		nodeIdx := int64(userID) % int64(nodeCount)
 		assignments[int(nodeIdx)]++
 	}
-	
+
 	// Each node should get roughly equal users (± 1 due to rounding)
 	expectedPerNode := userCount / nodeCount
-	
+
 	for nodeIdx, count := range assignments {
 		if count < expectedPerNode-1 || count > expectedPerNode+1 {
 			t.Errorf("Node %d got %d users, expected ~%d", nodeIdx, count, expectedPerNode)
 		}
 	}
-	
+
 	t.Logf("Distribution across %d nodes: %v", nodeCount, assignments)
 }
 
