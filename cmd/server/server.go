@@ -50,6 +50,10 @@ type MessageBoardServer struct {
 	nextAddress  string
 	nextReplica  api.ReplicationServiceClient
 	eventCounter int64
+
+	// Control plane connection
+	controlPlaneClient api.ControlPlaneClient
+	controlPlaneConn   *grpc.ClientConn
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -719,6 +723,44 @@ func (s *MessageBoardServer) extractTopicIDFromReplication(req *api.ReplicationR
 	return 0
 }
 
+// registerAndHeartbeat registers with control plane and sends periodic heartbeats
+func (s *MessageBoardServer) registerAndHeartbeat(isHead, isTail bool) {
+	if s.controlPlaneClient == nil {
+		return
+	}
+
+	register := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		_, err := s.controlPlaneClient.RegisterNode(ctx, &api.RegisterNodeRequest{
+			Node: &api.NodeInfo{
+				NodeId:  s.nodeID,
+				Address: s.address,
+			},
+			IsHead: isHead,
+			IsTail: isTail,
+		})
+
+		if err != nil {
+			log.Printf("Failed to register with control plane: %v", err)
+		} else {
+			log.Printf("Registered with control plane (head: %v, tail: %v)", isHead, isTail)
+		}
+	}
+
+	// Initial registration
+	register()
+
+	// Send heartbeat every 3 seconds
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		register()
+	}
+}
+
 func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.ReplicationRequest) (*api.ReplicationResponse, error) {
 	var ret struct{}
 	now := time.Now().Format("15:04:05.000") // HH:MM:SS.mmm
@@ -807,7 +849,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 
 
 // StartServer starts the gRPC server
-func StartServer(id string, url string, nextAddress string) {
+func StartServer(id string, url string, nextAddress string, controlPlaneAddr string) {
 	lis, err := net.Listen("tcp", url)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
@@ -827,6 +869,23 @@ func StartServer(id string, url string, nextAddress string) {
 			log.Fatalf("failed to connect to next node: %v", err)
 		}
 		server.nextReplica = api.NewReplicationServiceClient(conn)
+	}
+
+	// Connect to control plane if address provided
+	if controlPlaneAddr != "" {
+		conn, err := grpc.NewClient(controlPlaneAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Fatalf("failed to connect to control plane: %v", err)
+		}
+		server.controlPlaneConn = conn
+		server.controlPlaneClient = api.NewControlPlaneClient(conn)
+
+		// Determine if we're head or tail
+		isHead := (nextAddress != "")
+		isTail := (nextAddress == "")
+
+		// Register with control plane and start heartbeat
+		go server.registerAndHeartbeat(isHead, isTail)
 	}
 
 	if err := grpcServer.Serve(lis); err != nil {
