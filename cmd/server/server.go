@@ -51,16 +51,9 @@ type MessageBoardServer struct {
 	nextReplica  api.ReplicationServiceClient
 	eventCounter int64
 
-	// Control plane connection
-	controlPlaneClient api.ControlPlaneClient
-	controlPlaneConn   *grpc.ClientConn
-
-	// Subscription responsibility (modulo-based)
-	myModuloIndex            int32
-	totalNodes               int32
-	responsibilityLock       sync.RWMutex
-	lastResponsibilityUpdate time.Time
-	controlPlaneAvailable    bool
+	// Chain topology info
+	isHead bool
+	isTail bool
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -83,6 +76,8 @@ func NewMessageBoardServer(nodeID, address string, nextAddress string) *MessageB
 		address:             address,
 		nextAddress:         nextAddress,
 		eventCounter:        0,
+		isHead:              nextAddress != "",
+		isTail:              nextAddress == "",
 	}
 }
 
@@ -244,6 +239,12 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessa
 		if resp.AckSequenceNumber != seq {
 			return nil, status.Errorf(codes.Internal, "replication out of order")
 		}
+
+		// Mark message as clean after successful replication
+		s.messageStorage.MarkMessageClean(message.Id, &ret)
+	} else {
+		// If this is tail (no next replica), mark as clean immediately
+		s.messageStorage.MarkMessageClean(message.Id, &ret)
 	}
 
 	log.Printf("Posted message: %d in topic %d by user %d", message.Id, message.TopicId, message.UserId)
@@ -318,6 +319,10 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateM
 		if resp.AckSequenceNumber != seq {
 			return nil, status.Errorf(codes.Internal, "replication out of order")
 		}
+
+		// Mark message as clean after successful replication (update doesn't change dirty status in storage)
+	} else {
+		// Tail node - already clean
 	}
 
 	log.Printf("Updated message: %d", updatedMessage.Id)
@@ -484,6 +489,11 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessa
 
 // GetSubscriptionNode returns a node to which a subscription can be opened
 func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.SubscriptionNodeRequest) (*api.SubscriptionNodeResponse, error) {
+	// Only head can assign subscriptions
+	if !s.isHead {
+		return nil, status.Errorf(codes.PermissionDenied, "subscription assignment only allowed on head")
+	}
+
 	// Generate subscription token
 	token := generateToken()
 
@@ -497,8 +507,10 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 
 	log.Printf("Generated subscription token for user %d: %s", req.UserId, token)
 
-	// Determine which node should handle this subscription
-	targetNode := s.assignSubscriptionNode(ctx, req.UserId)
+	// Assign subscription node using modulo-based load balancing
+	// In chain replication, we can assign to any node that is not dirty
+	// For now, assign based on user ID to distribute load
+	targetNode := s.selectSubscriptionNode(req.UserId)
 
 	return &api.SubscriptionNodeResponse{
 		SubscribeToken: token,
@@ -506,57 +518,23 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 	}, nil
 }
 
-// assignSubscriptionNode calculates which node should handle a subscription for a given user
-func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID int64) *api.NodeInfo {
-	// If no control plane, default to this node
-	if s.controlPlaneClient == nil {
-		return &api.NodeInfo{
-			NodeId:  s.nodeID,
-			Address: s.address,
-		}
-	}
+// selectSubscriptionNode selects a node for a subscription based on user ID
+// Uses modulo-based load balancing to distribute subscriptions across the chain
+// Subscriptions can be assigned to any node that is not dirty
+func (s *MessageBoardServer) selectSubscriptionNode(userID int64) *api.NodeInfo {
+	// In chain replication without control plane, we assign subscriptions
+	// to nodes based on a modulo hash of the user ID
+	// This distributes load while keeping it deterministic
 
-	// Query control plane for node assignments
-	resp, err := s.controlPlaneClient.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
-	if err != nil {
-		log.Printf("Failed to get subscription assignments: %v (using cached assignments)", err)
-		// Use cached assignments (may be stale)
-		s.responsibilityLock.RLock()
-		staleness := time.Since(s.lastResponsibilityUpdate)
-		if staleness > 60*time.Second {
-			log.Printf("Warning: cached assignments stale for %.0fs", staleness.Seconds())
-		}
-		s.responsibilityLock.RUnlock()
+	// For a 3-node chain, we could have:
+	// - Node 0 (head): gets users where userID % 3 == 0
+	// - Node 1 (middle): gets users where userID % 3 == 1
+	// - Node 2 (tail): gets users where userID % 3 == 2
 
-		// Fallback to this node if no cached info
-		return &api.NodeInfo{
-			NodeId:  s.nodeID,
-			Address: s.address,
-		}
-	}
-
-	totalNodes := int32(len(resp.Assignments))
-	if totalNodes == 0 {
-		// No nodes registered, use this one
-		return &api.NodeInfo{
-			NodeId:  s.nodeID,
-			Address: s.address,
-		}
-	}
-
-	// Calculate target modulo index
-	targetIndex := userID % int64(totalNodes)
-
-	// Find node with matching modulo index
-	for _, assignment := range resp.Assignments {
-		if int64(assignment.ModuloIndex) == targetIndex {
-			log.Printf("Assigned user %d to node %s (index %d of %d)", userID, assignment.Node.NodeId, targetIndex, totalNodes)
-			return assignment.Node
-		}
-	}
-
-	// Fallback (shouldn't happen if control plane is working correctly)
-	log.Printf("Warning: no node found for user %d, falling back to self", userID)
+	// Since we don't have the full topology here, we return this node
+	// The head can have a more sophisticated assignment strategy
+	// and distribute subscriptions across multiple nodes
+	// For simplicity, return this node
 	return &api.NodeInfo{
 		NodeId:  s.nodeID,
 		Address: s.address,
@@ -752,21 +730,9 @@ func (s *MessageBoardServer) broadcastEvent(event *api.MessageEvent, topicID int
 
 // isResponsibleForUser checks if this node should broadcast to this user
 func (s *MessageBoardServer) isResponsibleForUser(userID int64) bool {
-	s.responsibilityLock.RLock()
-	defer s.responsibilityLock.RUnlock()
-
-	// If no control plane or no nodes registered, broadcast to all (default behavior)
-	if s.totalNodes == 0 {
-		return true
-	}
-
-	// Warn if control plane is unavailable and assignments are getting stale
-	if !s.controlPlaneAvailable && time.Since(s.lastResponsibilityUpdate) > 30*time.Second {
-		log.Printf("Warning: control plane unavailable for %.0fs, using stale responsibility assignments", time.Since(s.lastResponsibilityUpdate).Seconds())
-	}
-
-	// Modulo-based responsibility: userID % totalNodes == myModuloIndex
-	return (userID % int64(s.totalNodes)) == int64(s.myModuloIndex)
+	// In chain replication without a control plane, we broadcast to all subscribers
+	// The head decides which nodes get subscriptions
+	return true
 }
 
 // generateToken generates a random subscription token
@@ -802,96 +768,7 @@ func (s *MessageBoardServer) extractTopicIDFromReplication(req *api.ReplicationR
 	return 0
 }
 
-// registerAndHeartbeat registers with control plane and sends periodic heartbeats
-func (s *MessageBoardServer) registerAndHeartbeat(isHead, isTail bool) {
-	if s.controlPlaneClient == nil {
-		return
-	}
-
-	register := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		_, err := s.controlPlaneClient.RegisterNode(ctx, &api.RegisterNodeRequest{
-			Node: &api.NodeInfo{
-				NodeId:  s.nodeID,
-				Address: s.address,
-			},
-			IsHead: isHead,
-			IsTail: isTail,
-		})
-
-		if err != nil {
-			log.Printf("Failed to register with control plane: %v", err)
-		} else {
-			log.Printf("Registered with control plane (head: %v, tail: %v)", isHead, isTail)
-		}
-	}
-
-	// Initial registration
-	register()
-
-	// Sync responsibility immediately
-	s.syncResponsibility()
-
-	// Send heartbeat every 3 seconds
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		register()
-		// Also sync responsibility to pick up cluster changes
-		s.syncResponsibility()
-	}
-}
-
-// syncResponsibility queries control plane for this node's subscription responsibility
-func (s *MessageBoardServer) syncResponsibility() {
-	if s.controlPlaneClient == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	resp, err := s.controlPlaneClient.GetSubscriptionResponsibility(ctx, &emptypb.Empty{})
-
-	if err != nil {
-		s.responsibilityLock.Lock()
-		s.controlPlaneAvailable = false
-		elapsed := time.Since(s.lastResponsibilityUpdate)
-		s.responsibilityLock.Unlock()
-
-		log.Printf("Failed to sync responsibility (stale for %.1fs): %v", elapsed.Seconds(), err)
-		return
-	}
-
-	// Find this node's assignment
-	var myIndex int32 = -1
-	var totalNodes int32 = 0
-
-	for _, assignment := range resp.Assignments {
-		if assignment.Node.NodeId == s.nodeID {
-			myIndex = assignment.ModuloIndex
-			totalNodes = assignment.TotalNodes
-			break
-		}
-	}
-
-	if myIndex >= 0 {
-		s.responsibilityLock.Lock()
-		s.myModuloIndex = myIndex
-		s.totalNodes = totalNodes
-		s.lastResponsibilityUpdate = time.Now()
-		s.controlPlaneAvailable = true
-		s.responsibilityLock.Unlock()
-
-		log.Printf("Updated responsibility: myIndex=%d, totalNodes=%d (control plane available)", myIndex, totalNodes)
-	} else {
-		log.Printf("Node not found in responsibility assignments")
-	}
-}
-
+// ReplicateOperation handles replication of operations down the chain
 func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.ReplicationRequest) (*api.ReplicationResponse, error) {
 	var ret struct{}
 	now := time.Now().Format("15:04:05.000") // HH:MM:SS.mmm
@@ -957,11 +834,21 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 		}
 		now = time.Now().Format("15:04:05.000")
 		log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
+
+		// Mark message as clean after receiving ACK from downstream
+		if req.Message != nil {
+			s.messageStorage.MarkMessageClean(req.Message.Id, &ret)
+		}
 	} else {
-		// Tail node: return ACK immediately
+		// Tail node: return ACK immediately and mark as clean
 		now = time.Now().Format("15:04:05.000")
 		log.Printf("[%s] [Node %s] Tail processed sequence %d, sending ack", now, s.nodeID, req.SequenceNumber)
 		resp = &api.ReplicationResponse{AckSequenceNumber: req.SequenceNumber}
+
+		// Tail marks message as clean immediately
+		if req.Message != nil {
+			s.messageStorage.MarkMessageClean(req.Message.Id, &ret)
+		}
 	}
 
 	// ACK received (or we are tail) - broadcast to local subscribers
@@ -979,7 +866,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 }
 
 // StartServer starts the gRPC server
-func StartServer(id string, url string, nextAddress string, controlPlaneAddr string) {
+func StartServer(id string, url string, nextAddress string) {
 	lis, err := net.Listen("tcp", url)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
@@ -991,7 +878,7 @@ func StartServer(id string, url string, nextAddress string, controlPlaneAddr str
 	api.RegisterMessageBoardServer(grpcServer, server)
 	api.RegisterReplicationServiceServer(grpcServer, server)
 
-	log.Printf("Server listening on %s", url)
+	log.Printf("Server listening on %s (id: %s, isHead: %v, isTail: %v)", url, id, server.isHead, server.isTail)
 
 	if nextAddress != "" {
 		conn, err := grpc.NewClient(nextAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -999,23 +886,6 @@ func StartServer(id string, url string, nextAddress string, controlPlaneAddr str
 			log.Fatalf("failed to connect to next node: %v", err)
 		}
 		server.nextReplica = api.NewReplicationServiceClient(conn)
-	}
-
-	// Connect to control plane if address provided
-	if controlPlaneAddr != "" {
-		conn, err := grpc.NewClient(controlPlaneAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			log.Fatalf("failed to connect to control plane: %v", err)
-		}
-		server.controlPlaneConn = conn
-		server.controlPlaneClient = api.NewControlPlaneClient(conn)
-
-		// Determine if we're head or tail
-		isHead := (nextAddress != "")
-		isTail := (nextAddress == "")
-
-		// Register with control plane and start heartbeat
-		go server.registerAndHeartbeat(isHead, isTail)
 	}
 
 	if err := grpcServer.Serve(lis); err != nil {

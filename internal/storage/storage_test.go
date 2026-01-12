@@ -80,6 +80,12 @@ func TestMessageStorageCRUD(t *testing.T) {
 		t.Fatalf("CreateMessage failed: %v", err)
 	}
 
+	// Mark message as clean (simulating successful replication)
+	err = ms.MarkMessageClean(msg.Id, &ret)
+	if err != nil {
+		t.Fatalf("MarkMessageClean failed: %v", err)
+	}
+
 	// Read messages
 	var messages []*api.Message
 	err = ms.ReadMessages(1, &messages)

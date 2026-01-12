@@ -1,14 +1,13 @@
-.PHONY: build build-server build-cli build-tui build-controlplane clean test test-verbose test-coverage test-cli test-integration fmt help
+.PHONY: build build-server build-cli build-tui clean test test-verbose test-coverage test-cli test-integration fmt help
 
 # Variables
 BINARY_DIR = ./bin
 SERVER_BIN = $(BINARY_DIR)/razpravljalnica-server
 CLI_BIN = $(BINARY_DIR)/razpravljalnica-cli
 TUI_BIN = $(BINARY_DIR)/razpravljalnica-tui
-CONTROLPLANE_BIN = $(BINARY_DIR)/razpravljalnica-controlplane
 
 # Build all binaries
-build: build-server build-cli build-tui build-controlplane
+build: build-server build-cli build-tui
 	@echo "✓ All binaries built"
 
 # Build server
@@ -28,12 +27,6 @@ build-tui:
 	@mkdir -p $(BINARY_DIR)
 	@echo "Building TUI client..."
 	@go build -o $(TUI_BIN) ./cmd/tui
-
-# Build control plane
-build-controlplane:
-	@mkdir -p $(BINARY_DIR)
-	@echo "Building control plane..."
-	@go build -o $(CONTROLPLANE_BIN) ./cmd/controlplane
 
 # Run tests
 test:

@@ -47,17 +47,17 @@ func startTestServer(t *testing.T) *testServer {
 	headAddr := fmt.Sprintf("localhost:%d", headPort)
 	tailAddr := fmt.Sprintf("localhost:%d", tailPort)
 
-	// Start head node
-	headCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", headPort), "-id", "head")
-	if err := headCmd.Start(); err != nil {
-		t.Fatalf("Failed to start head node: %v", err)
+	// Start tail node first (no next node)
+	tailCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", tailPort), "-id", "tail")
+	if err := tailCmd.Start(); err != nil {
+		t.Fatalf("Failed to start tail node: %v", err)
 	}
 
-	// Start tail node connected to head
-	tailCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", tailPort), "-id", "tail", "-prev", headAddr)
-	if err := tailCmd.Start(); err != nil {
-		headCmd.Process.Kill()
-		t.Fatalf("Failed to start tail node: %v", err)
+	// Start head node connected to tail
+	headCmd := exec.Command("../bin/razpravljalnica-server", "-p", fmt.Sprintf("%d", headPort), "-id", "head", "-nextPort", fmt.Sprintf("%d", tailPort))
+	if err := headCmd.Start(); err != nil {
+		tailCmd.Process.Kill()
+		t.Fatalf("Failed to start head node: %v", err)
 	}
 
 	ts := &testServer{

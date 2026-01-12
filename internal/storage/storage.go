@@ -52,13 +52,15 @@ func NewSubscriptionStorage() *SubscriptionStorage {
 }
 
 type MessageStorage struct {
-	dict map[int64][]*api.Message //topic_id -> seznam message
-	lock sync.RWMutex
+	dict      map[int64][]*api.Message //topic_id -> seznam message
+	dirtyMsgs map[int64]bool           //message_id -> isDirty (true = not yet replicated)
+	lock      sync.RWMutex
 }
 
 func NewMessageStorage() *MessageStorage {
 	return &MessageStorage{
-		dict: make(map[int64][]*api.Message),
+		dict:      make(map[int64][]*api.Message),
+		dirtyMsgs: make(map[int64]bool),
 	}
 }
 
@@ -170,7 +172,24 @@ func (ms *MessageStorage) CreateMessage(message *api.Message, ret *struct{}) err
 		ms.dict[message.TopicId] = []*api.Message{}
 	}
 	ms.dict[message.TopicId] = append(ms.dict[message.TopicId], message)
+	// Mark as dirty initially (not yet replicated)
+	ms.dirtyMsgs[message.Id] = true
 	return nil
+}
+
+// MarkMessageClean marks a message as clean (replicated and confirmed)
+func (ms *MessageStorage) MarkMessageClean(messageId int64, ret *struct{}) error {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+	delete(ms.dirtyMsgs, messageId)
+	return nil
+}
+
+// IsMessageDirty checks if a message is dirty (not yet replicated)
+func (ms *MessageStorage) IsMessageDirty(messageId int64) bool {
+	ms.lock.RLock()
+	defer ms.lock.RUnlock()
+	return ms.dirtyMsgs[messageId]
 }
 
 func (ms *MessageStorage) DeleteMessage(messageId, topicId int64, ret *struct{}) error {
@@ -203,9 +222,31 @@ func (ms *MessageStorage) ReadMessages(topicId int64, dict *[]*api.Message) erro
 		return nil
 	}
 
+	// Filter out dirty messages (not yet replicated)
+	cleanMsgs := make([]*api.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		if !ms.dirtyMsgs[msg.Id] {
+			cleanMsgs = append(cleanMsgs, msg)
+		}
+	}
+
+	*dict = cleanMsgs
+	return nil
+}
+
+// ReadAllMessages returns all messages including dirty ones (for internal use)
+func (ms *MessageStorage) ReadAllMessages(topicId int64, dict *[]*api.Message) error {
+	ms.lock.RLock()
+	defer ms.lock.RUnlock()
+
+	msgs, ok := ms.dict[topicId]
+	if !ok {
+		*dict = []*api.Message{}
+		return nil
+	}
+
 	*dict = make([]*api.Message, len(msgs))
 	copy(*dict, msgs)
-
 	return nil
 }
 
