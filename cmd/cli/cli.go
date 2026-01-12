@@ -225,11 +225,16 @@ func RunCLI() error {
 
 						// Stream events
 						return service.StreamSubscription(ctx, userID, topicIDs, token, fromMessageID, func(event *api.MessageEvent) error {
-							fmt.Printf("[%s] %s: User %d in topic %d: %s (Likes: %d)\n",
+							//LIKE: [Tema] Ela: "blablabla"
+							//POST: [Tema] 
+							//DELETE: [Tema] Ela: "blablabla"
+							//UPDATE: [Tema]
+	
+							fmt.Printf("[%s] %s: [%d] User %d: %s (Likes: %d)\n",
 								event.EventAt.AsTime().Format("15:04:05"),
-								event.Op.String(),
-								event.Message.UserId,
+								event.Op.String()[3:],
 								event.Message.TopicId,
+								event.Message.UserId,
 								event.Message.Text,
 								event.Message.Likes,
 							)

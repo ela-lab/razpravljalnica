@@ -511,6 +511,7 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 	// In chain replication, we can assign to any node that is not dirty
 	// For now, assign based on user ID to distribute load
 	targetNode := s.selectSubscriptionNode(req.UserId)
+	log.Printf("User %d subscribed on node %s (%s) for topics %v", req.UserId, targetNode.NodeId, targetNode.Address, req.TopicId)
 
 	return &api.SubscriptionNodeResponse{
 		SubscribeToken: token,
@@ -622,8 +623,6 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 		return status.Errorf(codes.PermissionDenied, "token does not match user ID")
 	}
 
-	log.Printf("Subscription stream started for user %d topics: %v", req.UserId, req.TopicId)
-
 	// Create subscription channel
 	eventChan := make(chan *api.MessageEvent, 100)
 	token := req.SubscribeToken
@@ -637,6 +636,8 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 	for _, topicID := range req.TopicId {
 		s.subscriptionStorage.CreateSubscription(req.UserId, topicID, &ret)
 	}
+
+	log.Printf("Subscription stored: user=%d topic=%d", req.UserId, req.TopicId)
 
 	// Send historical messages if requested
 	if req.FromMessageId > 0 {
@@ -778,13 +779,13 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			return nil, status.Errorf(codes.Internal, "replicate create user failed: %v", err)
 		}
 		now = time.Now().Format("15:04:05.000")
-		log.Printf("[%s] [Node %s] Replicated CreateUser: %d", now, s.nodeID, req.User.Id)
+		log.Printf("[%s] Replicated CreateUser: %d", now, req.User.Id)
 	} else if req.Topic != nil {
 		if err := s.topicStorage.CreateTopic(req.Topic, &ret); err != nil {
 			return nil, status.Errorf(codes.Internal, "replicate create topic failed: %v", err)
 		}
 		now := time.Now().Format("15:04:05.000")
-		log.Printf("[%s] [Node %s] Replicated CreateTopic: %d", now, s.nodeID, req.Topic.Id)
+		log.Printf("[%s] Replicated CreateTopic: %d", now, req.Topic.Id)
 	} else {
 		switch req.Op {
 		case api.OpType_OP_POST:
@@ -792,21 +793,21 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 				return nil, status.Errorf(codes.Internal, "replicate post failed: %v", err)
 			}
 			now := time.Now().Format("15:04:05.000")
-			log.Printf("[%s] [Node %s] Replicated PostMessage: %d", now, s.nodeID, req.Message.Id)
+			log.Printf("[%s] Replicated PostMessage: %d", now, req.Message.Id)
 
 		case api.OpType_OP_UPDATE:
 			if err := s.messageStorage.UpdateMessage(req.Message, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate update failed: %v", err)
 			}
 			now := time.Now().Format("15:04:05.000")
-			log.Printf("[%s] [Node %s] Replicated UpdateMessage: %d", now, s.nodeID, req.Message.Id)
+			log.Printf("[%s] Replicated UpdateMessage: %d", now, req.Message.Id)
 
 		case api.OpType_OP_DELETE:
 			if err := s.messageStorage.DeleteMessage(req.Message.Id, req.Message.TopicId, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate delete failed: %v", err)
 			}
 			now := time.Now().Format("15:04:05.000")
-			log.Printf("[%s] [Node %s] Replicated DeleteMessage: %d", now, s.nodeID, req.Message.Id)
+			log.Printf("[%s] Replicated DeleteMessage: %d", now, req.Message.Id)
 
 		case api.OpType_OP_LIKE:
 			var liked bool
@@ -818,7 +819,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 				return nil, status.Errorf(codes.Internal, "replicate like failed: %v", err)
 			}
 			now := time.Now().Format("15:04:05.000")
-			log.Printf("[%s] [Node %s] Replicated LikeMessage: %d (User %d)", now, s.nodeID, req.Message.Id, req.Message.UserId)
+			log.Printf("[%s] Replicated LikeMessage: %d (User %d)", now, req.Message.Id, req.Message.UserId)
 		}
 	}
 
@@ -833,7 +834,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			return nil, err
 		}
 		now = time.Now().Format("15:04:05.000")
-		log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
+		log.Printf("[%s] Received ack from next node: %d", now, resp.AckSequenceNumber)
 
 		// Mark message as clean after receiving ACK from downstream
 		if req.Message != nil {
@@ -842,7 +843,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 	} else {
 		// Tail node: return ACK immediately and mark as clean
 		now = time.Now().Format("15:04:05.000")
-		log.Printf("[%s] [Node %s] Tail processed sequence %d, sending ack", now, s.nodeID, req.SequenceNumber)
+		log.Printf("[%s] Tail processed sequence %d, sending ack", now, req.SequenceNumber)
 		resp = &api.ReplicationResponse{AckSequenceNumber: req.SequenceNumber}
 
 		// Tail marks message as clean immediately
@@ -858,7 +859,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 		if topicID > 0 {
 			s.broadcastEvent(event, topicID)
 			now = time.Now().Format("15:04:05.000")
-			log.Printf("[%s] [Node %s] Broadcasted event to local subscribers (topic: %d)", now, s.nodeID, topicID)
+			log.Printf("[%s] Broadcasted event to local subscribers (topic: %d)", now, topicID)
 		}
 	}
 
@@ -878,7 +879,7 @@ func StartServer(id string, url string, nextAddress string) {
 	api.RegisterMessageBoardServer(grpcServer, server)
 	api.RegisterReplicationServiceServer(grpcServer, server)
 
-	log.Printf("Server listening on %s (id: %s, isHead: %v, isTail: %v)", url, id, server.isHead, server.isTail)
+	log.Printf("Server listening on%s (id: %s, isHead: %v, isTail: %v)", url, id, server.isHead, server.isTail)
 
 	if nextAddress != "" {
 		conn, err := grpc.NewClient(nextAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
