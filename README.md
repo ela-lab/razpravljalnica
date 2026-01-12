@@ -14,36 +14,39 @@ Razpravljalnica is a discussion board that allows users to:
 
 ### Distributed Architecture
 
-Razpravljalnica supports **chain replication** with distributed subscriptions:
+Razpravljalnica uses **chain replication** for fault tolerance and consistency:
 
-- **Chain Replication**: Write operations flow from head to tail; reads happen at tail; ensures consistency
-- **Distributed Subscriptions**: Subscription load is distributed across nodes using modulo-based hashing (`userID % nodeCount`)
-- **Control Plane**: Centralized coordination server manages node registry, health monitoring, and subscription responsibility assignment
-- **Backward Broadcasting**: Events are broadcast to subscribers as ACKs flow backward through the chain (after data is committed)
+- **Chain Replication**: Write operations flow from head through the chain to tail; reads available on all nodes (with dirty/clean filtering)
+- **Dirty/Clean Markers**: Messages marked dirty on creation, cleaned after full replication ensures read consistency
+- **Distributed Subscriptions**: Head node assigns subscriptions across chain using modulo-based hashing (`userID % nodeCount`)
+- **Backward Broadcasting**: Events broadcast to subscribers as ACKs flow backward through the chain (after replication confirms)
+- **No Control Plane**: Pure chain architecture without centralized coordinator
 
-#### How Distributed Subscriptions Work
+#### How Chain Replication Works
 
-1. **Registration**: Nodes register with control plane on startup, sending heartbeats every 3s
-2. **Responsibility Assignment**: Control plane maintains ordered node list and assigns each node a modulo index
-3. **Subscription Delegation**: Head calculates `userID % totalNodes` and directs clients to the responsible node
-4. **Filtered Broadcasting**: Each node only broadcasts events to users it's responsible for (matching `userID % totalNodes == myModuloIndex`)
-5. **Token Storage**: All nodes store all subscription tokens; filtering happens during broadcast
+1. **Write Path**: Head receives write → replicates to next node → ... → tail confirms → ACKs flow back
+2. **Read Consistency**: Messages marked dirty until full replication; reads filter dirty data
+3. **Subscription Assignment**: Head node calculates `userID % nodeCount` to balance subscription load
+4. **Event Broadcasting**: After replication completes, each node broadcasts to its assigned subscribers
+5. **Node Roles**: 
+   - Head: handles writes, assigns subscriptions
+   - Middle: forwards replication, serves reads, broadcasts events
+   - Tail: confirms replication, serves reads, broadcasts events
 
 ## Project Structure
 
 ```
 razpravljalnica/
 ├── api/                    # Protobuf definitions and generated code
-│   └── razpravljalnica.proto  # Includes ControlPlane service
+│   └── razpravljalnica.proto  # MessageBoard and ReplicationService
 ├── internal/
-│   ├── storage/           # Thread-safe in-memory storage
+│   ├── storage/           # Thread-safe in-memory storage with dirty/clean tracking
 │   └── client/            # Reusable gRPC client service
 ├── cmd/
 │   ├── server/            # Chain replica node
-│   ├── controlplane/      # Control plane server
 │   ├── cli/               # Command-line interface client
 │   └── tui/               # Terminal UI client (tview)
-├── tests/                  # Integration tests (including distributed subscriptions)
+├── tests/                  # Integration tests (chain replication, dirty/clean markers)
 ├── Makefile               # Build automation
 └── bin/                   # Compiled binaries (generated)
 ```
@@ -53,44 +56,44 @@ razpravljalnica/
 ### Building
 
 ```bash
-# Build all binaries (server, control plane, cli, tui)
+# Build all binaries (server, cli, tui)
 make build
 
 # Build specific components
 make build-server
-make build-controlplane
 make build-cli
 make build-tui
 ```
 
-### Running a Single Server (Non-Distributed)
+### Running a Single Server
 
 ```bash
-./bin/razpravljalnica-server -p 9876
+./bin/razpravljalnica-server -id head -p 9876
 ```
 
-### Running a Distributed Chain with Control Plane
+### Running a Chain (2-node example)
 
-**Start control plane:**
+**Start tail node first:**
 ```bash
-./bin/razpravljalnica-controlplane -p 8080
+# Tail node (no next node)
+./bin/razpravljalnica-server -id tail -p 9002
 ```
 
-**Start 3-node chain:**
+**Start head node connected to tail:**
 ```bash
-# Node 1 (head)
-./bin/razpravljalnica-server -p 9001 -id node1 -next localhost:9002 --control-plane localhost:8080
-
-# Node 2 (middle)
-./bin/razpravljalnica-server -p 9002 -id node2 -prev localhost:9001 -next localhost:9003 --control-plane localhost:8080
-
-# Node 3 (tail)
-./bin/razpravljalnica-server -p 9003 -id node3 -prev localhost:9002 --control-plane localhost:8080
+# Head node (points to tail via -nextPort)
+./bin/razpravljalnica-server -id head -p 9001 -nextPort 9002
 ```
 
 **Connect clients to the head** for write operations:
 ```bash
 ./bin/razpravljalnica-cli -s localhost -p 9001 register --name "Alice"
+```
+
+**Reads can be done on any node:**
+```bash
+./bin/razpravljalnica-cli -s localhost -p 9001 list-topics  # Read from head
+./bin/razpravljalnica-cli -s localhost -p 9002 list-topics  # Read from tail
 ```
 
 ### Running Clients
@@ -118,7 +121,7 @@ make build-tui
 
 **TUI Client (Terminal UI):**
 ```bash
-./bin/razpravljalnica-tui -s localhost -p 9876
+./bin/razpravljalnica-tui -s localhost -p 9001
 ```
 
 ## Testing
@@ -129,10 +132,12 @@ make test-verbose        # Run with race detector
 make test-coverage       # Generate coverage report
 ```
 
-**Distributed subscription test:**
+**Key test suites:**
 ```bash
 cd tests
-go test -v -run TestDistributedSubscriptions
+go test -v -run TestDirtyCleanMarkers           # Dirty/clean consistency
+go test -v -run TestDistributedSubscriptions    # Subscription load balancing
+go test -v -run TestBackwardBroadcastFlow       # Event propagation
 ```
 
 ## Implementation Details
@@ -140,35 +145,71 @@ go test -v -run TestDistributedSubscriptions
 ✅ Multi-user concurrent access  
 ✅ Thread-safe in-memory storage  
 ✅ Real-time subscriptions with streaming  
-✅ Chain replication (head writes, tail reads)
+✅ Chain replication (head writes, all nodes read)
+✅ Dirty/clean markers for read consistency
 ✅ Distributed subscriptions with modulo-based load balancing
-✅ Control plane for cluster coordination
 ✅ Backward event broadcasting (post-ACK)
+✅ Head-only subscription assignment (no control plane)
 ✅ Multiple client interfaces (CLI, TUI)
 ✅ Comprehensive unit and integration tests
 ✅ Clean modular architecture
 
 ## Architecture Highlights
 
-### Control Plane
-- Tracks registered nodes via heartbeat (3s interval)
-- Maintains ordered node list for consistent modulo assignment
-- Provides `GetSubscriptionResponsibility` RPC to query node assignments
-- Removes stale nodes after 10s timeout
+### Chain Replication Flow
 
-### Node Registration
-- Nodes connect to control plane on startup with `--control-plane` flag
-- Register as head/tail based on chain position
-- Sync responsibility (myModuloIndex, totalNodes) every 3s
+**Write Path:**
+1. Client sends write to head node
+2. Head creates message (marked dirty)
+3. Head forwards to next node via `ReplicateOperation`
+4. Middle node stores and forwards
+5. Tail stores and returns ACK
+6. ACKs flow backward through chain
+7. Each node marks message clean upon receiving downstream ACK
+8. Head returns success to client
+
+**Read Path:**
+- Reads allowed on all nodes
+- `ReadMessages()` filters out dirty messages
+- Ensures clients only see fully replicated data
+- Tail always has clean data (end of chain)
 
 ### Subscription Assignment
-- Head's `GetSubscriptionNode` queries control plane for node list
-- Calculates `targetIndex = userID % totalNodes`
-- Returns node matching targetIndex to client
-- Client connects to designated node for streaming
+
+**Head Node Responsibilities:**
+- Only head processes `GetSubscriptionNode` requests
+- Calculates `targetNode = userID % nodeCount`
+- Generates subscription token
+- Returns node assignment to client
+
+**All Nodes:**
+- Accept `SubscribeTopic` connections
+- Store subscription tokens
+- Broadcast events to their assigned subscribers
+- Filter events based on user responsibility
+
+### Dirty/Clean Consistency
+
+**Storage Layer:**
+- `dirtyMsgs map[int64]bool` tracks unreplicated messages
+- `CreateMessage()` sets dirty flag
+- `MarkMessageClean()` removes flag after replication
+- `ReadMessages()` filters dirty data
+- `IsMessageDirty()` checks replication status
+
+**Replication Flow:**
+- Head: marks clean after receiving ACK from downstream
+- Middle: marks clean after receiving ACK from next node
+- Tail: marks clean immediately (no downstream)
 
 ### Event Broadcasting
-- Replication: head → middle → tail (forward)
-- Broadcasting: tail ← middle ← head (backward, on ACK return)
-- Each node filters by `isResponsibleForUser(userID)` before sending
-- Fallback to broadcast-all if control plane unavailable
+
+After replication completes (ACK received):
+1. Tail broadcasts to local subscribers (if responsible)
+2. ACK flows to middle node
+3. Middle marks clean, broadcasts to local subscribers
+4. ACK flows to head
+5. Head marks clean, broadcasts to local subscribers
+6. Client receives write confirmation
+
+Each node broadcasts only to subscribers assigned to it based on modulo hashing.
