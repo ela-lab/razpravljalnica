@@ -196,12 +196,36 @@ message ReplicationResponse {
 // Control plane
 ////////////////////////////////////////////////////////////////////////////////
 
-// Return the the head and the tail node address
+// Control plane manages cluster state and subscription distribution
 service ControlPlane {
+  // Returns cluster topology (head, tail, all nodes)
   rpc GetClusterState(google.protobuf.Empty) returns (GetClusterStateResponse);
+  
+  // Registers a node with the control plane (used for heartbeat)
+  rpc RegisterNode(RegisterNodeRequest) returns (google.protobuf.Empty);
+  
+  // Returns subscription responsibility assignments for all nodes
+  rpc GetSubscriptionResponsibility(google.protobuf.Empty) returns (SubscriptionResponsibilityResponse);
 }
 
 message GetClusterStateResponse {
   NodeInfo head = 1;
   NodeInfo tail = 2;
+  repeated NodeInfo all_nodes = 3; // All nodes in the chain
+}
+
+message RegisterNodeRequest {
+  NodeInfo node = 1;
+  bool is_head = 2;  // True if this is the head node
+  bool is_tail = 3;  // True if this is the tail node
+}
+
+message SubscriptionResponsibilityResponse {
+  repeated NodeResponsibilityAssignment assignments = 1;
+}
+
+message NodeResponsibilityAssignment {
+  NodeInfo node = 1;
+  int32 modulo_index = 2;  // This node handles users where userID % total_nodes == modulo_index
+  int32 total_nodes = 3;   // Total number of nodes in the chain
 }
