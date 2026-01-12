@@ -81,7 +81,9 @@ service  MessageBoard{
   // Request a node to which a subscription can be opened.
   rpc GetSubscriptionNode(SubscriptionNodeRequest) returns (SubscriptionNodeResponse);
 
-  // Reads go to the tail node
+  // Reads allowed on all nodes (distributed reads)
+  // Optimization: Records marked dirty on write, clean on ACK
+  // If dirty record requested, node may fetch clean version from tail
 
   // Returns all the topics
   rpc ListTopics(google.protobuf.Empty) returns (ListTopicsResponse);
@@ -96,6 +98,12 @@ service  MessageBoard{
 
 service ReplicationService {
   rpc ReplicateOperation(ReplicationRequest) returns (ReplicationResponse);
+  
+  // Update chain topology when node fails (predecessor/successor addresses)
+  rpc UpdateChainTopology(UpdateChainTopologyRequest) returns (google.protobuf.Empty);
+  
+  // Sync missing data from predecessor after chain reconstruction
+  rpc SyncData(SyncDataRequest) returns (SyncDataResponse);
 }
 
 message CreateUserRequest {
@@ -192,6 +200,23 @@ message ReplicationResponse {
   int64 ack_sequence_number = 1; // potrjeni seqID
 }
 
+// Chain reconfiguration messages
+message UpdateChainTopologyRequest {
+  string new_next_address = 1;     // New successor node address (empty if this becomes tail)
+  string new_prev_address = 2;     // New predecessor node address (for sync purposes)
+  int64 last_ack_sequence = 3;     // Last sequence number acknowledged by predecessor
+  bool is_head = 4;                // True if this node is now head
+  bool is_tail = 5;                // True if this node is now tail
+}
+
+message SyncDataRequest {
+  int64 from_sequence = 1;  // Start syncing from this sequence number (exclusive)
+}
+
+message SyncDataResponse {
+  repeated ReplicationRequest operations = 1;  // All operations from sequence onwards
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Control plane
 ////////////////////////////////////////////////////////////////////////////////
@@ -206,6 +231,9 @@ service ControlPlane {
   
   // Returns subscription responsibility assignments for all nodes
   rpc GetSubscriptionResponsibility(google.protobuf.Empty) returns (SubscriptionResponsibilityResponse);
+  
+  // Notify control plane when a node detects its successor has failed
+  rpc ReportNodeFailure(ReportNodeFailureRequest) returns (google.protobuf.Empty);
 }
 
 message GetClusterStateResponse {
@@ -228,4 +256,8 @@ message NodeResponsibilityAssignment {
   NodeInfo node = 1;
   int32 modulo_index = 2;  // This node handles users where userID % total_nodes == modulo_index
   int32 total_nodes = 3;   // Total number of nodes in the chain
+}
+message ReportNodeFailureRequest {
+  string failed_node_id = 1;     // ID of the node that failed
+  string reporter_node_id = 2;   // ID of the node reporting the failure
 }

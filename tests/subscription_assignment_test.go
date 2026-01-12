@@ -209,7 +209,7 @@ func TestSubscriptionNodeAssignmentLogic(t *testing.T) {
 		{userID: 1, expectedNode: "node2", expectedAddr: "localhost:9002"},
 		{userID: 2, expectedNode: "node3", expectedAddr: "localhost:9003"},
 		{userID: 3, expectedNode: "node1", expectedAddr: "localhost:9001"},
-		{userID: 10, expectedNode: "node1", expectedAddr: "localhost:9001"},
+		{userID: 10, expectedNode: "node2", expectedAddr: "localhost:9002"}, // Fixed: 10 % 3 = 1 (node2)
 	}
 
 	for _, tt := range tests {

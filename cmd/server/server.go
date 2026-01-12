@@ -45,11 +45,12 @@ type MessageBoardServer struct {
 	tokensLock         sync.RWMutex
 
 	// Node info
-	nodeID       string
-	address      string
-	nextAddress  string
-	nextReplica  api.ReplicationServiceClient
-	eventCounter int64
+	nodeID          string
+	address         string
+	nextAddress     string
+	nextReplica     api.ReplicationServiceClient
+	nextReplicaConn *grpc.ClientConn
+	eventCounter    int64
 
 	// Control plane connection
 	controlPlaneClient api.ControlPlaneClient
@@ -892,6 +893,202 @@ func (s *MessageBoardServer) syncResponsibility() {
 	}
 }
 
+// UpdateChainTopology handles chain reconfiguration from control plane
+func (s *MessageBoardServer) UpdateChainTopology(ctx context.Context, req *api.UpdateChainTopologyRequest) (*emptypb.Empty, error) {
+	now := time.Now().Format("15:04:05.000")
+	log.Printf("[%s] [Node %s] Received chain topology update: prev=%s, next=%s, head=%v, tail=%v", 
+		now, s.nodeID, req.NewPrevAddress, req.NewNextAddress, req.IsHead, req.IsTail)
+
+	// Close existing next replica connection if any
+	if s.nextReplica != nil {
+		if s.nextReplicaConn != nil {
+			s.nextReplicaConn.Close()
+		}
+		s.nextReplica = nil
+		s.nextReplicaConn = nil
+	}
+
+	// Update next address
+	s.nextAddress = req.NewNextAddress
+
+	// Connect to new successor if provided
+	if s.nextAddress != "" && s.nextAddress != "none" {
+		conn, err := grpc.NewClient(s.nextAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("[%s] [Node %s] Failed to connect to new successor %s: %v", now, s.nodeID, s.nextAddress, err)
+			return nil, status.Errorf(codes.Internal, "failed to connect to successor: %v", err)
+		}
+		s.nextReplicaConn = conn
+		s.nextReplica = api.NewReplicationServiceClient(conn)
+		log.Printf("[%s] [Node %s] Connected to new successor: %s", now, s.nodeID, s.nextAddress)
+	} else {
+		log.Printf("[%s] [Node %s] No successor (tail node)", now, s.nodeID)
+	}
+
+	// Sync data from predecessor if available
+	if req.NewPrevAddress != "" && req.NewPrevAddress != "none" {
+		go s.catchupFromPredecessor(req.NewPrevAddress)
+	}
+
+	return &emptypb.Empty{}, nil
+}
+
+// catchupFromPredecessor syncs missing data from the predecessor node
+func (s *MessageBoardServer) catchupFromPredecessor(predecessorAddr string) {
+	now := time.Now().Format("15:04:05.000")
+	log.Printf("[%s] [Node %s] Starting catchup from predecessor: %s", now, s.nodeID, predecessorAddr)
+
+	// Connect to predecessor
+	conn, err := grpc.NewClient(predecessorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Printf("[%s] [Node %s] Failed to connect to predecessor %s for sync: %v", now, s.nodeID, predecessorAddr, err)
+		return
+	}
+	defer conn.Close()
+
+	client := api.NewReplicationServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Request all data (fromSequence=0 means get everything)
+	resp, err := client.SyncData(ctx, &api.SyncDataRequest{FromSequence: 0})
+	if err != nil {
+		log.Printf("[%s] [Node %s] Failed to sync data from predecessor: %v", now, s.nodeID, err)
+		return
+	}
+
+	// Apply all operations to local storage
+	log.Printf("[%s] [Node %s] Received %d operations from predecessor", now, s.nodeID, len(resp.Operations))
+	for i, op := range resp.Operations {
+		// Apply operation without forwarding to successor
+		if err := s.applyOperationLocally(op); err != nil {
+			log.Printf("[%s] [Node %s] Failed to apply operation %d during catchup: %v", now, s.nodeID, i, err)
+		}
+	}
+
+	log.Printf("[%s] [Node %s] Catchup complete: applied %d operations", now, s.nodeID, len(resp.Operations))
+}
+
+// applyOperationLocally applies a replicated operation without forwarding
+func (s *MessageBoardServer) applyOperationLocally(req *api.ReplicationRequest) error {
+	var ret struct{}
+
+	if req.User != nil {
+		if err := s.userStorage.CreateUser(req.User, &ret); err != nil {
+			// Ignore "already exists" errors during catchup
+			if _, ok := err.(*storage.UserAlreadyExistsError); !ok {
+				return err
+			}
+		}
+	} else if req.Topic != nil {
+		if err := s.topicStorage.CreateTopic(req.Topic, &ret); err != nil {
+			return err
+		}
+	} else {
+		switch req.Op {
+		case api.OpType_OP_POST:
+			if err := s.messageStorage.CreateMessage(req.Message, &ret); err != nil {
+				return err
+			}
+		case api.OpType_OP_UPDATE:
+			if err := s.messageStorage.UpdateMessage(req.Message, &ret); err != nil {
+				return err
+			}
+		case api.OpType_OP_DELETE:
+			if err := s.messageStorage.DeleteMessage(req.Message.Id, req.Message.TopicId, &ret); err != nil {
+				return err
+			}
+		case api.OpType_OP_LIKE:
+			var liked bool
+			if err := s.likeStorage.ToggleLike(&api.Like{
+				TopicId:   req.Message.TopicId,
+				MessageId: req.Message.Id,
+				UserId:    req.Message.UserId,
+			}, &liked); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Update sequence counter
+	if req.SequenceNumber > 0 {
+		atomic.StoreInt64(&s.sequenceCounter, req.SequenceNumber)
+	}
+
+	return nil
+}
+
+// SyncData returns all storage data for synchronization after chain reconstruction
+func (s *MessageBoardServer) SyncData(ctx context.Context, req *api.SyncDataRequest) (*api.SyncDataResponse, error) {
+	now := time.Now().Format("15:04:05.000")
+	log.Printf("[%s] [Node %s] SyncData request from sequence %d", now, s.nodeID, req.FromSequence)
+
+	var operations []*api.ReplicationRequest
+
+	// Get all users
+	users := s.userStorage.GetAllUsers()
+	for _, user := range users {
+		operations = append(operations, &api.ReplicationRequest{
+			User:           user,
+			SequenceNumber: 0, // Will be updated by receiving node
+		})
+	}
+
+	// Get all topics
+	topics := s.topicStorage.GetAllTopics()
+	for _, topic := range topics {
+		operations = append(operations, &api.ReplicationRequest{
+			Topic:          topic,
+			SequenceNumber: 0,
+		})
+	}
+
+	// Get all messages
+	allMessages := s.messageStorage.GetAllMessages()
+	for _, messages := range allMessages {
+		for _, msg := range messages {
+			operations = append(operations, &api.ReplicationRequest{
+				Op:             api.OpType_OP_POST,
+				Message:        msg,
+				SequenceNumber: 0,
+			})
+		}
+	}
+
+	// Get all likes (as OP_LIKE operations)
+	allLikes := s.likeStorage.GetAllLikes()
+	for msgID, userIDs := range allLikes {
+		// Find the message to get topic ID
+		var topicID int64
+		for tid, messages := range allMessages {
+			for _, msg := range messages {
+				if msg.Id == msgID {
+					topicID = tid
+					break
+				}
+			}
+			if topicID != 0 {
+				break
+			}
+		}
+
+		for _, userID := range userIDs {
+			operations = append(operations, &api.ReplicationRequest{
+				Op: api.OpType_OP_LIKE,
+				Message: &api.Message{
+					Id:      msgID,
+					TopicId: topicID,
+					UserId:  userID,
+				},
+				SequenceNumber: 0,
+			})
+		}
+	}
+
+	log.Printf("[%s] [Node %s] Returning %d operations for sync", now, s.nodeID, len(operations))
+	return &api.SyncDataResponse{Operations: operations}, nil
+}
+
 func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.ReplicationRequest) (*api.ReplicationResponse, error) {
 	var ret struct{}
 	now := time.Now().Format("15:04:05.000") // HH:MM:SS.mmm
@@ -998,6 +1195,7 @@ func StartServer(id string, url string, nextAddress string, controlPlaneAddr str
 		if err != nil {
 			log.Fatalf("failed to connect to next node: %v", err)
 		}
+		server.nextReplicaConn = conn
 		server.nextReplica = api.NewReplicationServiceClient(conn)
 	}
 

@@ -568,7 +568,9 @@ var MessageBoard_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ReplicationService_ReplicateOperation_FullMethodName = "/razpravljalnica.ReplicationService/ReplicateOperation"
+	ReplicationService_ReplicateOperation_FullMethodName  = "/razpravljalnica.ReplicationService/ReplicateOperation"
+	ReplicationService_UpdateChainTopology_FullMethodName = "/razpravljalnica.ReplicationService/UpdateChainTopology"
+	ReplicationService_SyncData_FullMethodName            = "/razpravljalnica.ReplicationService/SyncData"
 )
 
 // ReplicationServiceClient is the client API for ReplicationService service.
@@ -576,6 +578,10 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ReplicationServiceClient interface {
 	ReplicateOperation(ctx context.Context, in *ReplicationRequest, opts ...grpc.CallOption) (*ReplicationResponse, error)
+	// Update chain topology when node fails (predecessor/successor addresses)
+	UpdateChainTopology(ctx context.Context, in *UpdateChainTopologyRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Sync missing data from predecessor after chain reconstruction
+	SyncData(ctx context.Context, in *SyncDataRequest, opts ...grpc.CallOption) (*SyncDataResponse, error)
 }
 
 type replicationServiceClient struct {
@@ -596,11 +602,35 @@ func (c *replicationServiceClient) ReplicateOperation(ctx context.Context, in *R
 	return out, nil
 }
 
+func (c *replicationServiceClient) UpdateChainTopology(ctx context.Context, in *UpdateChainTopologyRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, ReplicationService_UpdateChainTopology_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *replicationServiceClient) SyncData(ctx context.Context, in *SyncDataRequest, opts ...grpc.CallOption) (*SyncDataResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SyncDataResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_SyncData_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ReplicationServiceServer is the server API for ReplicationService service.
 // All implementations must embed UnimplementedReplicationServiceServer
 // for forward compatibility.
 type ReplicationServiceServer interface {
 	ReplicateOperation(context.Context, *ReplicationRequest) (*ReplicationResponse, error)
+	// Update chain topology when node fails (predecessor/successor addresses)
+	UpdateChainTopology(context.Context, *UpdateChainTopologyRequest) (*emptypb.Empty, error)
+	// Sync missing data from predecessor after chain reconstruction
+	SyncData(context.Context, *SyncDataRequest) (*SyncDataResponse, error)
 	mustEmbedUnimplementedReplicationServiceServer()
 }
 
@@ -613,6 +643,12 @@ type UnimplementedReplicationServiceServer struct{}
 
 func (UnimplementedReplicationServiceServer) ReplicateOperation(context.Context, *ReplicationRequest) (*ReplicationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReplicateOperation not implemented")
+}
+func (UnimplementedReplicationServiceServer) UpdateChainTopology(context.Context, *UpdateChainTopologyRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateChainTopology not implemented")
+}
+func (UnimplementedReplicationServiceServer) SyncData(context.Context, *SyncDataRequest) (*SyncDataResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SyncData not implemented")
 }
 func (UnimplementedReplicationServiceServer) mustEmbedUnimplementedReplicationServiceServer() {}
 func (UnimplementedReplicationServiceServer) testEmbeddedByValue()                            {}
@@ -653,6 +689,42 @@ func _ReplicationService_ReplicateOperation_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ReplicationService_UpdateChainTopology_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateChainTopologyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).UpdateChainTopology(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_UpdateChainTopology_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).UpdateChainTopology(ctx, req.(*UpdateChainTopologyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ReplicationService_SyncData_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncDataRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).SyncData(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_SyncData_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).SyncData(ctx, req.(*SyncDataRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ReplicationService_ServiceDesc is the grpc.ServiceDesc for ReplicationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -664,6 +736,14 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "ReplicateOperation",
 			Handler:    _ReplicationService_ReplicateOperation_Handler,
 		},
+		{
+			MethodName: "UpdateChainTopology",
+			Handler:    _ReplicationService_UpdateChainTopology_Handler,
+		},
+		{
+			MethodName: "SyncData",
+			Handler:    _ReplicationService_SyncData_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "api/razpravljalnica.proto",
@@ -673,6 +753,7 @@ const (
 	ControlPlane_GetClusterState_FullMethodName               = "/razpravljalnica.ControlPlane/GetClusterState"
 	ControlPlane_RegisterNode_FullMethodName                  = "/razpravljalnica.ControlPlane/RegisterNode"
 	ControlPlane_GetSubscriptionResponsibility_FullMethodName = "/razpravljalnica.ControlPlane/GetSubscriptionResponsibility"
+	ControlPlane_ReportNodeFailure_FullMethodName             = "/razpravljalnica.ControlPlane/ReportNodeFailure"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -687,6 +768,8 @@ type ControlPlaneClient interface {
 	RegisterNode(ctx context.Context, in *RegisterNodeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Returns subscription responsibility assignments for all nodes
 	GetSubscriptionResponsibility(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SubscriptionResponsibilityResponse, error)
+	// Notify control plane when a node detects its successor has failed
+	ReportNodeFailure(ctx context.Context, in *ReportNodeFailureRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type controlPlaneClient struct {
@@ -727,6 +810,16 @@ func (c *controlPlaneClient) GetSubscriptionResponsibility(ctx context.Context, 
 	return out, nil
 }
 
+func (c *controlPlaneClient) ReportNodeFailure(ctx context.Context, in *ReportNodeFailureRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, ControlPlane_ReportNodeFailure_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -739,6 +832,8 @@ type ControlPlaneServer interface {
 	RegisterNode(context.Context, *RegisterNodeRequest) (*emptypb.Empty, error)
 	// Returns subscription responsibility assignments for all nodes
 	GetSubscriptionResponsibility(context.Context, *emptypb.Empty) (*SubscriptionResponsibilityResponse, error)
+	// Notify control plane when a node detects its successor has failed
+	ReportNodeFailure(context.Context, *ReportNodeFailureRequest) (*emptypb.Empty, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -757,6 +852,9 @@ func (UnimplementedControlPlaneServer) RegisterNode(context.Context, *RegisterNo
 }
 func (UnimplementedControlPlaneServer) GetSubscriptionResponsibility(context.Context, *emptypb.Empty) (*SubscriptionResponsibilityResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSubscriptionResponsibility not implemented")
+}
+func (UnimplementedControlPlaneServer) ReportNodeFailure(context.Context, *ReportNodeFailureRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportNodeFailure not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -833,6 +931,24 @@ func _ControlPlane_GetSubscriptionResponsibility_Handler(srv interface{}, ctx co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_ReportNodeFailure_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportNodeFailureRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).ReportNodeFailure(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_ReportNodeFailure_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).ReportNodeFailure(ctx, req.(*ReportNodeFailureRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -851,6 +967,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSubscriptionResponsibility",
 			Handler:    _ControlPlane_GetSubscriptionResponsibility_Handler,
+		},
+		{
+			MethodName: "ReportNodeFailure",
+			Handler:    _ControlPlane_ReportNodeFailure_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

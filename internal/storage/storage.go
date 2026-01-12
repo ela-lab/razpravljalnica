@@ -97,6 +97,17 @@ func (us *UserStorage) ReadUser(id int64, name *string) error {
 	return nil
 }
 
+// GetAllUsers returns all users (for syncing)
+func (us *UserStorage) GetAllUsers() []*api.User {
+	us.lock.RLock()
+	defer us.lock.RUnlock()
+	users := make([]*api.User, 0, len(us.dict))
+	for _, user := range us.dict {
+		users = append(users, user)
+	}
+	return users
+}
+
 // LIKES
 func (ls *LikeStorage) CreateLike(like *api.Like, ret *struct{}) error {
 	ls.lock.Lock()
@@ -161,6 +172,19 @@ func (ls *LikeStorage) ReadLikes(messageId int64, likes *int64) error {
 	return nil
 }
 
+// GetAllLikes returns all likes (for syncing)
+func (ls *LikeStorage) GetAllLikes() map[int64][]int64 {
+	ls.lock.RLock()
+	defer ls.lock.RUnlock()
+	result := make(map[int64][]int64, len(ls.dict))
+	for msgID, userIDs := range ls.dict {
+		userIDCopy := make([]int64, len(userIDs))
+		copy(userIDCopy, userIDs)
+		result[msgID] = userIDCopy
+	}
+	return result
+}
+
 // MESSAGES
 func (ms *MessageStorage) CreateMessage(message *api.Message, ret *struct{}) error {
 	ms.lock.Lock()
@@ -207,6 +231,19 @@ func (ms *MessageStorage) ReadMessages(topicId int64, dict *[]*api.Message) erro
 	copy(*dict, msgs)
 
 	return nil
+}
+
+// GetAllMessages returns all messages across all topics (for syncing)
+func (ms *MessageStorage) GetAllMessages() map[int64][]*api.Message {
+	ms.lock.RLock()
+	defer ms.lock.RUnlock()
+	result := make(map[int64][]*api.Message, len(ms.dict))
+	for topicID, messages := range ms.dict {
+		messageCopy := make([]*api.Message, len(messages))
+		copy(messageCopy, messages)
+		result[topicID] = messageCopy
+	}
+	return result
 }
 
 func (ms *MessageStorage) UpdateMessage(message *api.Message, ret *struct{}) error {
@@ -269,4 +306,15 @@ func (ts *TopicStorage) ReadTopics(topics *[]*api.Topic) error {
 		*topics = append(*topics, val)
 	}
 	return nil
+}
+
+// GetAllTopics returns all topics (for syncing)
+func (ts *TopicStorage) GetAllTopics() []*api.Topic {
+	ts.lock.RLock()
+	defer ts.lock.RUnlock()
+	topics := make([]*api.Topic, 0, len(ts.dict))
+	for _, topic := range ts.dict {
+		topics = append(topics, topic)
+	}
+	return topics
 }

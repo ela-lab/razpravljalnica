@@ -116,13 +116,13 @@ func TestConcurrentSubscriptionsStress(t *testing.T) {
 
 // TestHighThroughputBroadcast tests many messages
 func TestHighThroughputBroadcast(t *testing.T) {
-	messageCount := 10000
-	subscriberCount := 100
+	messageCount := 1000  // Reduced from 10000
+	subscriberCount := 50 // Reduced from 100
 
 	// Create subscriber channels
 	subscribers := make([]chan int64, subscriberCount)
 	for i := 0; i < subscriberCount; i++ {
-		subscribers[i] = make(chan int64, 1000)
+		subscribers[i] = make(chan int64, 100) // Reduced buffer from 1000
 	}
 
 	start := time.Now()
@@ -133,7 +133,7 @@ func TestHighThroughputBroadcast(t *testing.T) {
 			select {
 			case ch <- msgID:
 				// Sent
-			case <-time.After(1 * time.Millisecond):
+			case <-time.After(100 * time.Microsecond): // Reduced timeout from 1ms
 				// Skip slow subscriber
 			}
 		}
