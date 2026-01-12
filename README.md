@@ -127,18 +127,20 @@ make build-tui
 
 **TUI Client (Terminal UI):**
 ```bash
-# Connect to head node
-./bin/razpravljalnica-tui -s localhost -p 9001
+# Connect to chain replication cluster (specify head and tail nodes)
+./bin/razpravljalnica-tui -head localhost:9001 -tail localhost:9003
 
 # The TUI automatically:
-# - Sends all writes to the head node
+# - Sends all writes to the head node (9001)
+# - Sends all reads to the tail node (9003) for confirmed data
 # - Gets subscription assignments from head
-# - Connects to assigned nodes for streaming
+# - Connects to assigned subscription nodes for streaming (distributed across chain)
 ```
 
 **TUI Features:**
 - F1: Help, F2: Login/Register, F3: Create Topic
 - S: Subscribe/Unsubscribe to selected topic
+- Topic list shows assigned subscription node: ✓ Topic [localhost:9002]
 - E: Edit your messages, Del: Delete your messages
 - Enter: Like/Unlike messages, send messages
 - Automatic routing to subscription nodes

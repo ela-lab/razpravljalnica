@@ -18,7 +18,8 @@ import (
 
 type TUIApp struct {
 	app         *tview.Application
-	service     *client.ClientService // Head node (for writes and subscription assignment)
+	headService *client.ClientService // Head node (for writes and subscription assignment)
+	tailService *client.ClientService // Tail node (for one-time reads)
 	subService  *client.ClientService // Subscription node (for streaming)
 	currentUser int64
 	mainLayout  tview.Primitive
@@ -39,29 +40,40 @@ type TUIApp struct {
 	selectedMessageIndex int
 	topics               []*api.Topic       // Cache topics list
 	subscribedTopics     map[int64]bool     // Track subscribed topics
+	topicSubNodes        map[int64]string   // Track subscription node per topic
 	autoScroll           bool               // Auto-scroll to bottom when new messages arrive
 	likedMessages        map[int64]bool     // Track which messages current user has liked
 	subCancel            context.CancelFunc // Cancel active subscription stream
 	editingMessageID     int64              // Message ID being edited (0 if not editing)
 	editingMessageIndex  int                // Index of message being edited
 	inDialog             bool               // True when a modal form is active
+	currentSubNodeAddr   string             // Current subscription node address
 }
 
-func RunTUI(url string) error {
-	fmt.Printf("Connecting to head node at %s...\n", url)
+func RunTUI(headURL, tailURL string) error {
+	fmt.Printf("Connecting to head node at %s...\n", headURL)
+	fmt.Printf("Connecting to tail node at %s...\n", tailURL)
 
-	service, err := client.NewClientService(url, 10*time.Second)
+	headService, err := client.NewClientService(headURL, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to connect to head: %w", err)
 	}
-	defer service.Close()
+	defer headService.Close()
+
+	tailService, err := client.NewClientService(tailURL, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to tail: %w", err)
+	}
+	defer tailService.Close()
 
 	tui := &TUIApp{
 		app:              tview.NewApplication(),
-		service:          service, // Head node for writes
-		subService:       nil,     // Will be set after GetSubscriptionNode
+		headService:      headService, // Head node for writes
+		tailService:      tailService, // Tail node for reads
+		subService:       nil,         // Will be set after GetSubscriptionNode
 		userNames:        make(map[int64]string),
 		subscribedTopics: make(map[int64]bool),
+		topicSubNodes:    make(map[int64]string),
 		likedMessages:    make(map[int64]bool),
 		autoScroll:       true,
 	}
@@ -263,7 +275,7 @@ func (t *TUIApp) handleGlobalKeys(event *tcell.EventKey) *tcell.EventKey {
 }
 
 func (t *TUIApp) loadTopics() error {
-	topics, err := t.service.ListTopics()
+	topics, err := t.tailService.ListTopics()
 	if err != nil {
 		return err
 	}
@@ -276,9 +288,14 @@ func (t *TUIApp) loadTopics() error {
 
 	for _, topic := range topics {
 		topicName := topic.Name
-		// Add indicator if subscribed
+		// Add indicator if subscribed with node info
 		if t.subscribedTopics[topic.Id] {
-			topicName = "✓ " + topicName
+			nodeAddr := t.topicSubNodes[topic.Id]
+			if nodeAddr != "" {
+				topicName = fmt.Sprintf("✓ %s [%s]", topicName, nodeAddr)
+			} else {
+				topicName = "✓ " + topicName
+			}
 		}
 		t.topicList.AddItem(topicName, "", 0, nil)
 	}
@@ -346,7 +363,7 @@ const (
 )
 
 func (t *TUIApp) loadMessages(topicID int64) {
-	messages, err := t.service.GetMessages(topicID, 0, messageFetchLimit)
+	messages, err := t.tailService.GetMessages(topicID, 0, messageFetchLimit)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Error loading messages: %v[white]", err))
 		return
@@ -411,7 +428,7 @@ func (t *TUIApp) onMessageSend(key tcell.Key) {
 
 	// If editing a message, update it instead of posting a new one
 	if t.editingMessageID != 0 {
-		_, err := t.service.UpdateMessage(t.currentUser, t.currentTopicID, t.editingMessageID, text)
+		_, err := t.headService.UpdateMessage(t.currentUser, t.currentTopicID, t.editingMessageID, text)
 		if err != nil {
 			t.showStatus(fmt.Sprintf("[red]Failed to update message: %v[white]", err))
 		} else {
@@ -439,7 +456,7 @@ func (t *TUIApp) onMessageSend(key tcell.Key) {
 		return
 	}
 
-	_, err := t.service.PostMessage(t.currentUser, t.currentTopicID, text)
+	_, err := t.headService.PostMessage(t.currentUser, t.currentTopicID, text)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Error: %v[white]", err))
 		return
@@ -467,21 +484,28 @@ func (t *TUIApp) showLoginDialog() {
 			return
 		}
 
-		user, err := t.service.GetUser(id)
-		if err != nil {
-			form.SetTitle(fmt.Sprintf("[red]Login failed: %v[white]", err))
-			return
-		}
+		// Run login in background to avoid freezing UI
+		go func() {
+			user, err := t.tailService.GetUser(id)
+			if err != nil {
+				t.app.QueueUpdateDraw(func() {
+					form.SetTitle(fmt.Sprintf("[red]Login failed: %v[white]", err))
+				})
+				return
+			}
 
-		t.currentUser = user.Id
-		t.currentUserName = user.Name
-		t.userNames[user.Id] = user.Name
-		t.showStatus(fmt.Sprintf("[green]Logged in as %s (ID: %d)[white]", user.Name, user.Id))
-		// Reload subscriptions from server so they persist across sessions
-		t.syncSubscriptionsFromServer()
-		t.restartSubscriptionForCurrentView()
-		t.inDialog = false
-		t.app.SetRoot(t.mainLayout, true)
+			t.app.QueueUpdateDraw(func() {
+				t.currentUser = user.Id
+				t.currentUserName = user.Name
+				t.userNames[user.Id] = user.Name
+				t.showStatus(fmt.Sprintf("[green]Logged in as %s (ID: %d)[white]", user.Name, user.Id))
+				// Reload subscriptions from server so they persist across sessions
+				t.syncSubscriptionsFromServer()
+				t.restartSubscriptionForCurrentView()
+				t.inDialog = false
+				t.app.SetRoot(t.mainLayout, true)
+			})
+		}()
 	})
 
 	form.AddButton("Register New", func() {
@@ -491,21 +515,28 @@ func (t *TUIApp) showLoginDialog() {
 			return
 		}
 
-		user, err := t.service.CreateUser(name)
-		if err != nil {
-			t.showStatus(fmt.Sprintf("[red]Register failed: %v[white]", err))
-			return
-		}
+		// Run registration in background to avoid freezing UI
+		go func() {
+			user, err := t.headService.CreateUser(name)
+			if err != nil {
+				t.app.QueueUpdateDraw(func() {
+					t.showStatus(fmt.Sprintf("[red]Register failed: %v[white]", err))
+				})
+				return
+			}
 
-		t.currentUser = user.Id
-		t.currentUserName = user.Name
-		t.userNames[user.Id] = user.Name
-		t.showStatus(fmt.Sprintf("[green]Registered as %s (ID: %d)[white]", user.Name, user.Id))
-		// New users start with empty subscriptions; sync for consistency
-		t.syncSubscriptionsFromServer()
-		t.restartSubscriptionForCurrentView()
-		t.inDialog = false
-		t.app.SetRoot(t.mainLayout, true)
+			t.app.QueueUpdateDraw(func() {
+				t.currentUser = user.Id
+				t.currentUserName = user.Name
+				t.userNames[user.Id] = user.Name
+				t.showStatus(fmt.Sprintf("[green]Registered as %s (ID: %d)[white]", user.Name, user.Id))
+				// New users start with empty subscriptions; sync for consistency
+				t.syncSubscriptionsFromServer()
+				t.restartSubscriptionForCurrentView()
+				t.inDialog = false
+				t.app.SetRoot(t.mainLayout, true)
+			})
+		}()
 	})
 
 	form.AddButton("Cancel", func() {
@@ -562,7 +593,7 @@ func (t *TUIApp) showNewTopicDialog() {
 			return
 		}
 
-		topic, err := t.service.CreateTopic(topicName)
+		topic, err := t.headService.CreateTopic(topicName)
 		if err != nil {
 			t.showStatus(fmt.Sprintf("[red]Error: %v[white]", err))
 			t.inDialog = false
@@ -683,7 +714,7 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 	t.subCancel = cancel
 
 	// Get subscription node assignment from head
-	token, nodeInfo, err := t.service.GetSubscriptionNode(t.currentUser, topicIDs)
+	token, nodeInfo, err := t.headService.GetSubscriptionNode(t.currentUser, topicIDs)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Subscription error: %v[white]", err))
 		return
@@ -691,10 +722,20 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 
 	// Connect to assigned subscription node if different from current
 	if nodeInfo != nil && nodeInfo.Address != "" {
-		// Close previous subscription connection if exists
-		if t.subService != nil && t.subService != t.service {
+		// Close previous subscription connection if exists and it's not head/tail
+		if t.subService != nil && t.subService != t.headService && t.subService != t.tailService {
 			t.subService.Close()
 		}
+
+		// Update current subscription node address and track per topic
+		t.currentSubNodeAddr = nodeInfo.Address
+		for _, topicID := range topicIDs {
+			t.topicSubNodes[topicID] = nodeInfo.Address
+		}
+		t.app.QueueUpdateDraw(func() {
+			t.refreshTopBar()
+			t.loadTopics() // Refresh to show node assignments
+		})
 
 		// Create new connection to assigned node
 		subService, err := client.NewClientService(nodeInfo.Address, 10*time.Second)
@@ -704,8 +745,12 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 		}
 		t.subService = subService
 	} else {
-		// No node info returned, use head for subscriptions
-		t.subService = t.service
+		// No node info returned, use head for subscriptions (shouldn't happen in chain replication)
+		t.currentSubNodeAddr = ""
+		for _, topicID := range topicIDs {
+			t.topicSubNodes[topicID] = ""
+		}
+		t.subService = t.headService
 	}
 
 	go func() {
@@ -764,7 +809,7 @@ func (t *TUIApp) likeMessage() {
 	topicID := msg.TopicId
 
 	// Toggle like on the server (server will add/remove)
-	_, err := t.service.LikeMessage(t.currentUser, topicID, msg.Id)
+	_, err := t.headService.LikeMessage(t.currentUser, topicID, msg.Id)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Error liking message: %v[white]", err))
 		return
@@ -802,7 +847,7 @@ func (t *TUIApp) deleteMessage() {
 	}
 
 	topicID := msg.TopicId
-	err := t.service.DeleteMessage(t.currentUser, topicID, msg.Id)
+	err := t.headService.DeleteMessage(t.currentUser, topicID, msg.Id)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Error deleting message: %v[white]", err))
 		return
@@ -855,7 +900,7 @@ func (t *TUIApp) loadSubscriptionFeed() {
 
 	var all []*feedEntry
 	for _, topicID := range subscribedIDs {
-		messages, err := t.service.GetMessages(topicID, 0, messageFetchLimit)
+		messages, err := t.tailService.GetMessages(topicID, 0, messageFetchLimit)
 		if err != nil {
 			continue
 		}
@@ -914,7 +959,7 @@ func (t *TUIApp) loadSubscriptionFeed() {
 	}
 }
 
-// refreshTopBar updates the top info bar with user, time, and subscription count.
+// refreshTopBar updates the top info bar with user, time, subscription count, and subscription node.
 func (t *TUIApp) refreshTopBar() {
 	subscribed := 0
 	for _, sub := range t.subscribedTopics {
@@ -933,7 +978,14 @@ func (t *TUIApp) refreshTopBar() {
 	}
 
 	clock := time.Now().Format("2006-01-02 15:04:05")
-	text := fmt.Sprintf("[yellow]%s[white] | [cyan]%s[white] | Subscribed: [green]%d[white]", userLabel, clock, subscribed)
+
+	// Add subscription node info if assigned
+	nodeInfo := ""
+	if t.currentSubNodeAddr != "" {
+		nodeInfo = fmt.Sprintf(" | SubNode: [magenta]%s[white]", t.currentSubNodeAddr)
+	}
+
+	text := fmt.Sprintf("[yellow]%s[white] | [cyan]%s[white] | Subscribed: [green]%d[white]%s", userLabel, clock, subscribed, nodeInfo)
 	t.topBar.SetText(text)
 }
 
@@ -943,7 +995,7 @@ func (t *TUIApp) syncSubscriptionsFromServer() {
 		return
 	}
 
-	subscribedIDs, err := t.service.ListSubscriptions(t.currentUser)
+	subscribedIDs, err := t.tailService.ListSubscriptions(t.currentUser)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Failed to load subscriptions: %v[white]", err))
 		return
@@ -970,7 +1022,7 @@ func (t *TUIApp) ensureUserName(userID int64) string {
 		return name
 	}
 
-	user, err := t.service.GetUser(userID)
+	user, err := t.tailService.GetUser(userID)
 	if err == nil && user != nil {
 		t.userNames[userID] = user.Name
 		return user.Name

@@ -2,18 +2,15 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 )
 
 func main() {
-	serverURL := flag.String("s", "localhost", "server address")
-	port := flag.Int("p", 9876, "port number")
+	headURL := flag.String("head", "localhost:9001", "head node address (for writes)")
+	tailURL := flag.String("tail", "localhost:9003", "tail node address (for reads)")
 	flag.Parse()
 
-	url := fmt.Sprintf("%s:%d", *serverURL, *port)
-
-	if err := RunTUI(url); err != nil {
+	if err := RunTUI(*headURL, *tailURL); err != nil {
 		log.Fatalf("TUI error: %v", err)
 	}
 }

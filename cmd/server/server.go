@@ -53,10 +53,11 @@ type MessageBoardServer struct {
 	eventCounter int64
 
 	// Chain topology info
-	isHead     bool
-	isTail     bool
-	chainNodes []string // All node addresses in the chain
-	nodeIndex  int      // This node's index in the chain
+	isHead              bool
+	isTail              bool
+	chainNodes          []string // All node addresses in the chain
+	nodeIndex           int      // This node's index in the chain
+	subscriptionCounter int64    // Round-robin counter for client distribution
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -97,7 +98,7 @@ func NewMessageBoardServer(nodeID, address string, nextAddress string, chainNode
 
 // CreateUser creates a new user
 func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUserRequest) (*api.User, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	userID := atomic.AddInt64(&s.userIDCounter, 1)
@@ -152,7 +153,7 @@ func (s *MessageBoardServer) GetUser(ctx context.Context, req *api.GetUserReques
 
 // CreateTopic creates a new topic
 func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTopicRequest) (*api.Topic, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	topicID := atomic.AddInt64(&s.topicIDCounter, 1)
@@ -191,7 +192,7 @@ func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTop
 
 // PostMessage posts a new message to a topic
 func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessageRequest) (*api.Message, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	// Verify user exists
@@ -276,7 +277,7 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessa
 
 // UpdateMessage updates an existing message
 func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateMessageRequest) (*api.Message, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	// Get existing messages for the topic
@@ -354,7 +355,7 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateM
 
 // DeleteMessage deletes an existing message
 func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteMessageRequest) (*emptypb.Empty, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	// Get existing messages for the topic
@@ -419,7 +420,7 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteM
 
 // LikeMessage adds a like to a message
 func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessageRequest) (*api.Message, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	// Get existing messages for the topic
@@ -511,8 +512,8 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 	// Generate subscription token
 	token := generateToken()
 
-	// Assign subscription node using modulo-based load balancing
-	targetNode := s.selectSubscriptionNode(req.UserId)
+	// Assign subscription node using round-robin load balancing across clients
+	targetNode := s.selectSubscriptionNode()
 
 	// Store token locally on head (dirty state initially)
 	s.tokensLock.Lock()
@@ -555,9 +556,9 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 	}, nil
 }
 
-// selectSubscriptionNode selects a node for a subscription based on user ID
-// Uses modulo-based load balancing to distribute subscriptions across the chain
-func (s *MessageBoardServer) selectSubscriptionNode(userID int64) *api.NodeInfo {
+// selectSubscriptionNode selects a node for a subscription based on round-robin
+// Uses client-based load balancing to distribute subscriptions across the chain
+func (s *MessageBoardServer) selectSubscriptionNode() *api.NodeInfo {
 	// If no chain topology, default to this node
 	if len(s.chainNodes) == 0 {
 		return &api.NodeInfo{
@@ -566,9 +567,10 @@ func (s *MessageBoardServer) selectSubscriptionNode(userID int64) *api.NodeInfo 
 		}
 	}
 
-	// Calculate which node should handle this subscription
+	// Round-robin: increment counter and distribute across nodes
 	nodeCount := int64(len(s.chainNodes))
-	targetIndex := userID % nodeCount
+	counter := atomic.AddInt64(&s.subscriptionCounter, 1)
+	targetIndex := (counter - 1) % nodeCount
 	targetAddress := s.chainNodes[targetIndex]
 
 	return &api.NodeInfo{
