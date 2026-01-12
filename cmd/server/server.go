@@ -610,14 +610,22 @@ func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.Lis
 
 // GetMessages returns messages from a topic
 func (s *MessageBoardServer) GetMessages(ctx context.Context, req *api.GetMessagesRequest) (*api.GetMessagesResponse, error) {
-	// Reads allowed on all nodes - returns dirty/clean based on node state
+	// Reads allowed on all nodes - returns only clean (committed) data
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read messages: %v", err)
 	}
 
-	// Update like counts for all messages
+	// Filter out dirty (uncommitted) messages - only return clean data
+	var cleanMessages []*api.Message
 	for _, msg := range messages {
+		if !s.dirtyBits.IsMessageDirty(req.TopicId, msg.Id) {
+			cleanMessages = append(cleanMessages, msg)
+		}
+	}
+
+	// Update like counts for clean messages
+	for _, msg := range cleanMessages {
 		var likeCount int64
 		if err := s.likeStorage.ReadLikes(msg.Id, &likeCount); err == nil {
 			msg.Likes = int32(likeCount)
@@ -626,7 +634,7 @@ func (s *MessageBoardServer) GetMessages(ctx context.Context, req *api.GetMessag
 
 	// Filter from message ID
 	var filteredMessages []*api.Message
-	for _, msg := range messages {
+	for _, msg := range cleanMessages {
 		if msg.Id >= req.FromMessageId {
 			filteredMessages = append(filteredMessages, msg)
 		}
