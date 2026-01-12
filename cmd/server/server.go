@@ -31,6 +31,7 @@ type MessageBoardServer struct {
 	messageStorage      storage.MessageStorage
 	likeStorage         storage.LikeStorage
 	subscriptionStorage storage.SubscriptionStorage
+	dirtyBits           *storage.DirtyBitTracker // Tracks which records are dirty (locally written, not yet ACKed)
 
 	// ID counters
 	userIDCounter    int64
@@ -78,6 +79,7 @@ func NewMessageBoardServer(nodeID, address string, nextAddress string) *MessageB
 		messageStorage:      *storage.NewMessageStorage(),
 		likeStorage:         *storage.NewLikeStorage(),
 		subscriptionStorage: *storage.NewSubscriptionStorage(),
+		dirtyBits:           storage.NewDirtyBitTracker(),
 		subscribers:         make(map[string]chan *api.MessageEvent),
 		subscriptionTokens:  make(map[string]*SubscriptionInfo),
 		nodeID:              nodeID,
@@ -228,6 +230,9 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessa
 		return nil, status.Errorf(codes.Internal, "failed to create message: %v", err)
 	}
 
+	// Mark message as dirty (locally written, not yet ACKed from tail)
+	s.dirtyBits.MarkMessageDirty(req.TopicId, messageID)
+
 	seq := atomic.AddInt64(&s.eventCounter, 1)
 
 	if s.nextReplica != nil {
@@ -245,6 +250,9 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessa
 		if resp.AckSequenceNumber != seq {
 			return nil, status.Errorf(codes.Internal, "replication out of order")
 		}
+
+		// Mark message as clean once ACK is received
+		s.dirtyBits.MarkMessageClean(req.TopicId, messageID)
 	}
 
 	log.Printf("Posted message: %d in topic %d by user %d", message.Id, message.TopicId, message.UserId)
@@ -451,6 +459,9 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessa
 		Likes:     int32(likeCount),
 	}
 
+	// Mark like as dirty
+	s.dirtyBits.MarkLikeDirty(req.MessageId, req.UserId)
+
 	seq := atomic.AddInt64(&s.eventCounter, 1)
 
 	if s.nextReplica != nil {
@@ -468,6 +479,9 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessa
 		if resp.AckSequenceNumber != seq {
 			return nil, status.Errorf(codes.Internal, "replication out of order")
 		}
+
+		// Mark like as clean once ACK is received
+		s.dirtyBits.MarkLikeClean(req.MessageId, req.UserId)
 	}
 
 	log.Printf("Liked message: %d (now %d likes)", req.MessageId, likeCount)
@@ -1111,6 +1125,8 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			if err := s.messageStorage.CreateMessage(req.Message, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate post failed: %v", err)
 			}
+			// Mark message as dirty when received on intermediate nodes
+			s.dirtyBits.MarkMessageDirty(req.Message.TopicId, req.Message.Id)
 			now := time.Now().Format("15:04:05.000")
 			log.Printf("[%s] [Node %s] Replicated PostMessage: %d", now, s.nodeID, req.Message.Id)
 
@@ -1118,6 +1134,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			if err := s.messageStorage.UpdateMessage(req.Message, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate update failed: %v", err)
 			}
+			s.dirtyBits.MarkMessageDirty(req.Message.TopicId, req.Message.Id)
 			now := time.Now().Format("15:04:05.000")
 			log.Printf("[%s] [Node %s] Replicated UpdateMessage: %d", now, s.nodeID, req.Message.Id)
 
@@ -1125,6 +1142,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			if err := s.messageStorage.DeleteMessage(req.Message.Id, req.Message.TopicId, &ret); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate delete failed: %v", err)
 			}
+			s.dirtyBits.MarkMessageDirty(req.Message.TopicId, req.Message.Id)
 			now := time.Now().Format("15:04:05.000")
 			log.Printf("[%s] [Node %s] Replicated DeleteMessage: %d", now, s.nodeID, req.Message.Id)
 
@@ -1137,6 +1155,7 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			}, &liked); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate like failed: %v", err)
 			}
+			s.dirtyBits.MarkLikeDirty(req.Message.Id, req.Message.UserId)
 			now := time.Now().Format("15:04:05.000")
 			log.Printf("[%s] [Node %s] Replicated LikeMessage: %d (User %d)", now, s.nodeID, req.Message.Id, req.Message.UserId)
 		}
@@ -1154,6 +1173,16 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 		}
 		now = time.Now().Format("15:04:05.000")
 		log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
+
+		// Mark data as clean after ACK received
+		if req.User == nil && req.Topic == nil {
+			switch req.Op {
+			case api.OpType_OP_POST, api.OpType_OP_UPDATE, api.OpType_OP_DELETE:
+				s.dirtyBits.MarkMessageClean(req.Message.TopicId, req.Message.Id)
+			case api.OpType_OP_LIKE:
+				s.dirtyBits.MarkLikeClean(req.Message.Id, req.Message.UserId)
+			}
+		}
 	} else {
 		// Tail node: return ACK immediately
 		now = time.Now().Format("15:04:05.000")

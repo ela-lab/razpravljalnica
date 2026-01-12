@@ -16,6 +16,85 @@ func (e *UserAlreadyExistsError) Error() string {
 	return fmt.Sprintf("user with name '%s' already exists", e.Name)
 }
 
+// DirtyBitTracker tracks which records have been modified locally (dirty) vs replicated from tail (clean)
+// A record is marked dirty when first written, then clean when the ACK propagates back through the chain
+type DirtyBitTracker struct {
+	// messagesDirty tracks dirty state for messages: [topicID][messageID] = isDirty
+	messagesDirty map[int64]map[int64]bool
+	// likesDirty tracks dirty state for likes: [messageID][userID] = isDirty
+	likesDirty map[int64]map[int64]bool
+	lock       sync.RWMutex
+}
+
+func NewDirtyBitTracker() *DirtyBitTracker {
+	return &DirtyBitTracker{
+		messagesDirty: make(map[int64]map[int64]bool),
+		likesDirty:    make(map[int64]map[int64]bool),
+	}
+}
+
+// MarkMessageDirty marks a message as dirty (locally written, not yet ACKed)
+func (dbt *DirtyBitTracker) MarkMessageDirty(topicID, messageID int64) {
+	dbt.lock.Lock()
+	defer dbt.lock.Unlock()
+	if dbt.messagesDirty[topicID] == nil {
+		dbt.messagesDirty[topicID] = make(map[int64]bool)
+	}
+	dbt.messagesDirty[topicID][messageID] = true
+}
+
+// MarkMessageClean marks a message as clean (ACK received from successor)
+func (dbt *DirtyBitTracker) MarkMessageClean(topicID, messageID int64) {
+	dbt.lock.Lock()
+	defer dbt.lock.Unlock()
+	if dbt.messagesDirty[topicID] != nil {
+		dbt.messagesDirty[topicID][messageID] = false
+	}
+}
+
+// IsMessageDirty checks if a message is dirty
+func (dbt *DirtyBitTracker) IsMessageDirty(topicID, messageID int64) bool {
+	dbt.lock.RLock()
+	defer dbt.lock.RUnlock()
+	if dbt.messagesDirty[topicID] != nil {
+		if isDirty, ok := dbt.messagesDirty[topicID][messageID]; ok {
+			return isDirty
+		}
+	}
+	return false
+}
+
+// MarkLikeDirty marks a like as dirty
+func (dbt *DirtyBitTracker) MarkLikeDirty(messageID, userID int64) {
+	dbt.lock.Lock()
+	defer dbt.lock.Unlock()
+	if dbt.likesDirty[messageID] == nil {
+		dbt.likesDirty[messageID] = make(map[int64]bool)
+	}
+	dbt.likesDirty[messageID][userID] = true
+}
+
+// MarkLikeClean marks a like as clean
+func (dbt *DirtyBitTracker) MarkLikeClean(messageID, userID int64) {
+	dbt.lock.Lock()
+	defer dbt.lock.Unlock()
+	if dbt.likesDirty[messageID] != nil {
+		dbt.likesDirty[messageID][userID] = false
+	}
+}
+
+// IsLikeDirty checks if a like is dirty
+func (dbt *DirtyBitTracker) IsLikeDirty(messageID, userID int64) bool {
+	dbt.lock.RLock()
+	defer dbt.lock.RUnlock()
+	if dbt.likesDirty[messageID] != nil {
+		if isDirty, ok := dbt.likesDirty[messageID][userID]; ok {
+			return isDirty
+		}
+	}
+	return false
+}
+
 type UserStorage struct {
 	dict    map[int64]*api.User
 	nameIdx map[string]int64 // username -> user ID for fast lookup
