@@ -72,7 +72,7 @@ func TestDistributedSubscriptions(t *testing.T) {
 	defer node3Cmd.Process.Kill()
 
 	// Wait for nodes to register and stabilize
-	time.Sleep(2 * time.Second)
+	time.Sleep(4 * time.Second)
 
 	// Try connecting to head with retries
 	var headConn *grpc.ClientConn

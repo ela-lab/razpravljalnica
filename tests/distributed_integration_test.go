@@ -14,11 +14,12 @@ func TestSingleNodeWithoutControlPlane(t *testing.T) {
 	// All operations should work normally
 
 	// Test basic operations
-	if srv.port == 0 {
-		t.Fatal("Server port not set")
+	if srv.headPort == 0 {
+		t.Fatal("Head server port not set")
 	}
 
-	t.Logf("Single node server running on port %d without control plane", srv.port)
+	t.Logf("Head node server running on port %d without control plane", srv.headPort)
+	t.Logf("Tail node server running on port %d without control plane", srv.tailPort)
 }
 
 // TestNodeRegistrationFlow tests the 4-stage registration process

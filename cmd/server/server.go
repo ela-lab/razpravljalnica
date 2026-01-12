@@ -132,9 +132,7 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUser
 
 // GetUser returns user info by id
 func (s *MessageBoardServer) GetUser(ctx context.Context, req *api.GetUserRequest) (*api.User, error) {
-	if s.nodeID != "tail" {
-		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
-	}
+	// Reads allowed on all nodes - returns dirty/clean based on node state
 	var name string
 	if err := s.userStorage.ReadUser(req.UserId, &name); err != nil || name == "" {
 		return nil, status.Errorf(codes.NotFound, "user not found: %d", req.UserId)
@@ -567,9 +565,7 @@ func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID 
 
 // ListTopics returns all topics
 func (s *MessageBoardServer) ListTopics(ctx context.Context, req *emptypb.Empty) (*api.ListTopicsResponse, error) {
-	if s.nodeID != "tail" {
-		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
-	}
+	// Reads allowed on all nodes - returns dirty/clean based on node state
 	var topics []*api.Topic
 	if err := s.topicStorage.ReadTopics(&topics); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read topics: %v", err)
@@ -582,9 +578,7 @@ func (s *MessageBoardServer) ListTopics(ctx context.Context, req *emptypb.Empty)
 
 // ListSubscriptions returns subscriptions for a user
 func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.ListSubscriptionsRequest) (*api.ListSubscriptionsResponse, error) {
-	if s.nodeID != "tail" {
-		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
-	}
+	// Reads allowed on all nodes - returns dirty/clean based on node state
 	resp := &api.ListSubscriptionsResponse{}
 	resp.TopicId = make([]int64, 0)
 	if req == nil {
@@ -601,9 +595,7 @@ func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.Lis
 
 // GetMessages returns messages from a topic
 func (s *MessageBoardServer) GetMessages(ctx context.Context, req *api.GetMessagesRequest) (*api.GetMessagesResponse, error) {
-	if s.nodeID != "tail" {
-		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
-	}
+	// Reads allowed on all nodes - returns dirty/clean based on node state
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read messages: %v", err)
