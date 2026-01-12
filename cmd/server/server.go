@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,8 +53,10 @@ type MessageBoardServer struct {
 	eventCounter int64
 
 	// Chain topology info
-	isHead bool
-	isTail bool
+	isHead     bool
+	isTail     bool
+	chainNodes []string // All node addresses in the chain
+	nodeIndex  int      // This node's index in the chain
 }
 
 // SubscriptionInfo stores information about a subscription token
@@ -63,7 +66,16 @@ type SubscriptionInfo struct {
 }
 
 // NewMessageBoardServer creates a new server instance
-func NewMessageBoardServer(nodeID, address string, nextAddress string) *MessageBoardServer {
+func NewMessageBoardServer(nodeID, address string, nextAddress string, chainNodes []string) *MessageBoardServer {
+	// Find this node's index in the chain
+	nodeIndex := -1
+	for i, nodeAddr := range chainNodes {
+		if nodeAddr == address || strings.HasSuffix(address, nodeAddr) {
+			nodeIndex = i
+			break
+		}
+	}
+
 	return &MessageBoardServer{
 		userStorage:         *storage.NewUserStorage(),
 		topicStorage:        *storage.NewTopicStorage(),
@@ -78,6 +90,8 @@ func NewMessageBoardServer(nodeID, address string, nextAddress string) *MessageB
 		eventCounter:        0,
 		isHead:              nextAddress != "",
 		isTail:              nextAddress == "",
+		chainNodes:          chainNodes,
+		nodeIndex:           nodeIndex,
 	}
 }
 
@@ -497,7 +511,10 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 	// Generate subscription token
 	token := generateToken()
 
-	// Store subscription info
+	// Assign subscription node using modulo-based load balancing
+	targetNode := s.selectSubscriptionNode(req.UserId)
+
+	// Store token locally on head (dirty state initially)
 	s.tokensLock.Lock()
 	s.subscriptionTokens[token] = &SubscriptionInfo{
 		UserID:   req.UserId,
@@ -505,13 +522,32 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 	}
 	s.tokensLock.Unlock()
 
-	log.Printf("Generated subscription token for user %d: %s", req.UserId, token)
+	// Replicate token distribution through the chain with dirty/clean consistency
+	seq := atomic.AddInt64(&s.sequenceCounter, 1)
 
-	// Assign subscription node using modulo-based load balancing
-	// In chain replication, we can assign to any node that is not dirty
-	// For now, assign based on user ID to distribute load
-	targetNode := s.selectSubscriptionNode(req.UserId)
-	log.Printf("User %d subscribed on node %s (%s) for topics %v", req.UserId, targetNode.NodeId, targetNode.Address, req.TopicId)
+	if s.nextReplica != nil {
+		// Replicate through the chain so all nodes get the token
+		repReq := &api.ReplicationRequest{
+			Op:             api.OpType_OP_TOKEN,
+			Token:          token,
+			UserId:         req.UserId,
+			TopicIds:       req.TopicId,
+			SequenceNumber: seq,
+		}
+
+		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "token replication failed: %v", err)
+		}
+
+		if resp.AckSequenceNumber != seq {
+			return nil, status.Errorf(codes.Internal, "token replication out of order")
+		}
+
+		log.Printf("Token %s replicated for user %d (sequence: %d)", token, req.UserId, seq)
+	}
+
+	log.Printf("Generated subscription token for user %d assigned to node %s: %s", req.UserId, targetNode.Address, token)
 
 	return &api.SubscriptionNodeResponse{
 		SubscribeToken: token,
@@ -521,24 +557,23 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 
 // selectSubscriptionNode selects a node for a subscription based on user ID
 // Uses modulo-based load balancing to distribute subscriptions across the chain
-// Subscriptions can be assigned to any node that is not dirty
 func (s *MessageBoardServer) selectSubscriptionNode(userID int64) *api.NodeInfo {
-	// In chain replication without control plane, we assign subscriptions
-	// to nodes based on a modulo hash of the user ID
-	// This distributes load while keeping it deterministic
+	// If no chain topology, default to this node
+	if len(s.chainNodes) == 0 {
+		return &api.NodeInfo{
+			NodeId:  s.nodeID,
+			Address: s.address,
+		}
+	}
 
-	// For a 3-node chain, we could have:
-	// - Node 0 (head): gets users where userID % 3 == 0
-	// - Node 1 (middle): gets users where userID % 3 == 1
-	// - Node 2 (tail): gets users where userID % 3 == 2
+	// Calculate which node should handle this subscription
+	nodeCount := int64(len(s.chainNodes))
+	targetIndex := userID % nodeCount
+	targetAddress := s.chainNodes[targetIndex]
 
-	// Since we don't have the full topology here, we return this node
-	// The head can have a more sophisticated assignment strategy
-	// and distribute subscriptions across multiple nodes
-	// For simplicity, return this node
 	return &api.NodeInfo{
-		NodeId:  s.nodeID,
-		Address: s.address,
+		NodeId:  fmt.Sprintf("node-%d", targetIndex),
+		Address: targetAddress,
 	}
 }
 
@@ -819,7 +854,19 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 				return nil, status.Errorf(codes.Internal, "replicate like failed: %v", err)
 			}
 			now := time.Now().Format("15:04:05.000")
-			log.Printf("[%s] Replicated LikeMessage: %d (User %d)", now, req.Message.Id, req.Message.UserId)
+			log.Printf("[%s] [Node %s] Replicated LikeMessage: %d (User %d)", now, s.nodeID, req.Message.Id, req.Message.UserId)
+
+		case api.OpType_OP_TOKEN:
+			// Store subscription token on this node
+			s.tokensLock.Lock()
+			s.subscriptionTokens[req.Token] = &SubscriptionInfo{
+				UserID:   req.UserId,
+				TopicIDs: req.TopicIds,
+			}
+			s.tokensLock.Unlock()
+			now := time.Now().Format("15:04:05.000")
+			log.Printf("[%s] [Node %s] Stored subscription token %s for User %d on %d topics",
+				now, s.nodeID, req.Token, req.UserId, len(req.TopicIds))
 		}
 	}
 
@@ -867,14 +914,14 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 }
 
 // StartServer starts the gRPC server
-func StartServer(id string, url string, nextAddress string) {
+func StartServer(id string, url string, nextAddress string, chainNodes []string) {
 	lis, err := net.Listen("tcp", url)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
 	grpcServer := grpc.NewServer()
-	server := NewMessageBoardServer(id, url, nextAddress)
+	server := NewMessageBoardServer(id, url, nextAddress, chainNodes)
 
 	api.RegisterMessageBoardServer(grpcServer, server)
 	api.RegisterReplicationServiceServer(grpcServer, server)

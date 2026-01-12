@@ -40,6 +40,7 @@ enum OpType {
   OP_LIKE   = 1; // like a message
   OP_DELETE = 2; // delete a message
   OP_UPDATE = 3; // update a message
+  OP_TOKEN  = 4; // distribute subscription token
 }
 
 message NodeInfo {
@@ -186,6 +187,9 @@ message ReplicationRequest {
   User user = 3;             // if CreateUser
   Topic topic = 4;           // if CreateTopic
   Message message = 5;       // if Post/Update/Delete/LikeMessage
+  string token = 6;          // if OP_TOKEN - subscription token to distribute
+  int64 user_id = 7;         // if OP_TOKEN - user ID for the subscription
+  repeated int64 topic_ids = 8; // if OP_TOKEN - topic IDs for the subscription
 }
 
 message ReplicationResponse {

@@ -30,6 +30,7 @@ const (
 	OpType_OP_LIKE   OpType = 1 // like a message
 	OpType_OP_DELETE OpType = 2 // delete a message
 	OpType_OP_UPDATE OpType = 3 // update a message
+	OpType_OP_TOKEN  OpType = 4 // distribute subscription token
 )
 
 // Enum value maps for OpType.
@@ -39,12 +40,14 @@ var (
 		1: "OP_LIKE",
 		2: "OP_DELETE",
 		3: "OP_UPDATE",
+		4: "OP_TOKEN",
 	}
 	OpType_value = map[string]int32{
 		"OP_POST":   0,
 		"OP_LIKE":   1,
 		"OP_DELETE": 2,
 		"OP_UPDATE": 3,
+		"OP_TOKEN":  4,
 	}
 )
 
@@ -1238,9 +1241,12 @@ type ReplicationRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	SequenceNumber int64                  `protobuf:"varint,1,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`
 	Op             OpType                 `protobuf:"varint,2,opt,name=op,proto3,enum=razpravljalnica.OpType" json:"op,omitempty"`
-	User           *User                  `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`       // if CreateUser
-	Topic          *Topic                 `protobuf:"bytes,4,opt,name=topic,proto3" json:"topic,omitempty"`     // if CreateTopic
-	Message        *Message               `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"` // if Post/Update/Delete/LikeMessage
+	User           *User                  `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`                                 // if CreateUser
+	Topic          *Topic                 `protobuf:"bytes,4,opt,name=topic,proto3" json:"topic,omitempty"`                               // if CreateTopic
+	Message        *Message               `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`                           // if Post/Update/Delete/LikeMessage
+	Token          string                 `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`                               // if OP_TOKEN - subscription token to distribute
+	UserId         int64                  `protobuf:"varint,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`              // if OP_TOKEN - user ID for the subscription
+	TopicIds       []int64                `protobuf:"varint,8,rep,packed,name=topic_ids,json=topicIds,proto3" json:"topic_ids,omitempty"` // if OP_TOKEN - topic IDs for the subscription
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1306,6 +1312,27 @@ func (x *ReplicationRequest) GetTopic() *Topic {
 func (x *ReplicationRequest) GetMessage() *Message {
 	if x != nil {
 		return x.Message
+	}
+	return nil
+}
+
+func (x *ReplicationRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *ReplicationRequest) GetUserId() int64 {
+	if x != nil {
+		return x.UserId
+	}
+	return 0
+}
+
+func (x *ReplicationRequest) GetTopicIds() []int64 {
+	if x != nil {
+		return x.TopicIds
 	}
 	return nil
 }
@@ -1434,20 +1461,24 @@ const file_api_razpravljalnica_proto_rawDesc = "" +
 	"\x0fsequence_number\x18\x01 \x01(\x03R\x0esequenceNumber\x12'\n" +
 	"\x02op\x18\x02 \x01(\x0e2\x17.razpravljalnica.OpTypeR\x02op\x122\n" +
 	"\amessage\x18\x03 \x01(\v2\x18.razpravljalnica.MessageR\amessage\x125\n" +
-	"\bevent_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\aeventAt\"\xf3\x01\n" +
+	"\bevent_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\aeventAt\"\xbf\x02\n" +
 	"\x12ReplicationRequest\x12'\n" +
 	"\x0fsequence_number\x18\x01 \x01(\x03R\x0esequenceNumber\x12'\n" +
 	"\x02op\x18\x02 \x01(\x0e2\x17.razpravljalnica.OpTypeR\x02op\x12)\n" +
 	"\x04user\x18\x03 \x01(\v2\x15.razpravljalnica.UserR\x04user\x12,\n" +
 	"\x05topic\x18\x04 \x01(\v2\x16.razpravljalnica.TopicR\x05topic\x122\n" +
-	"\amessage\x18\x05 \x01(\v2\x18.razpravljalnica.MessageR\amessage\"E\n" +
+	"\amessage\x18\x05 \x01(\v2\x18.razpravljalnica.MessageR\amessage\x12\x14\n" +
+	"\x05token\x18\x06 \x01(\tR\x05token\x12\x17\n" +
+	"\auser_id\x18\a \x01(\x03R\x06userId\x12\x1b\n" +
+	"\ttopic_ids\x18\b \x03(\x03R\btopicIds\"E\n" +
 	"\x13ReplicationResponse\x12.\n" +
-	"\x13ack_sequence_number\x18\x01 \x01(\x03R\x11ackSequenceNumber*@\n" +
+	"\x13ack_sequence_number\x18\x01 \x01(\x03R\x11ackSequenceNumber*N\n" +
 	"\x06OpType\x12\v\n" +
 	"\aOP_POST\x10\x00\x12\v\n" +
 	"\aOP_LIKE\x10\x01\x12\r\n" +
 	"\tOP_DELETE\x10\x02\x12\r\n" +
-	"\tOP_UPDATE\x10\x032\xfc\a\n" +
+	"\tOP_UPDATE\x10\x03\x12\f\n" +
+	"\bOP_TOKEN\x10\x042\xfc\a\n" +
 	"\fMessageBoard\x12G\n" +
 	"\n" +
 	"CreateUser\x12\".razpravljalnica.CreateUserRequest\x1a\x15.razpravljalnica.User\x12A\n" +
