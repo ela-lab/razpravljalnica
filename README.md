@@ -96,10 +96,10 @@ make build-tui
 ./bin/razpravljalnica-cli -s localhost -p 9001 register --name "Alice"
 ```
 
-**Reads can be done on any node:**
+**Reads can be done on tail, writes on head:**
 ```bash
-./bin/razpravljalnica-cli -s localhost -p 9001 list-topics  # Read from head
 ./bin/razpravljalnica-cli -s localhost -p 9002 list-topics  # Read from tail
+./bin/razpravljalnica-cli -s localhost -p 9001 create-topic --title "Questions"  # Write to head
 ```
 
 ### Running Clients
