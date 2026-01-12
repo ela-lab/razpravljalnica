@@ -1,55 +1,61 @@
 # Razpravljalnica
 
-A distributed discussion board service implemented in Go using gRPC with chain replication and distributed subscriptions.
+**Razpravljalnica** is a distributed discussion board service implemented in Go, using gRPC and chain replication to ensure consistency, fault tolerance, and real-time message delivery.
 
-## Overview
+## Features
 
-Razpravljalnica is a discussion board that allows users to:
-- Register as users
-- Create discussion topics
-- Post messages within topics
-- Like messages
-- Edit and delete their own messages
-- Subscribe to topics and receive real-time message updates
+- User registration  
+- Topic creation and message posting  
+- Message editing, deletion, and likes  
+- Topic subscriptions with real-time updates  
+- Command-line (CLI) and terminal UI (TUI) clients  
 
-### Distributed Architecture
+## Architecture Overview
 
-Razpravljalnica uses **chain replication** for fault tolerance and consistency:
+The system is based on **chain replication**, providing strong consistency without relying on a centralized coordinator.
 
-- **Chain Replication**: Write operations flow from head through the chain to tail; reads available on all nodes (with dirty/clean filtering)
-- **Dirty/Clean Markers**: Messages marked dirty on creation, cleaned after full replication ensures read consistency
-- **Distributed Subscriptions**: Head node assigns subscriptions across chain using modulo-based hashing (`userID % nodeCount`)
-- **Backward Broadcasting**: Events broadcast to subscribers as ACKs flow backward through the chain (after replication confirms)
-- **No Control Plane**: Pure chain architecture without centralized coordinator
+### Core Principles
 
-#### How Chain Replication Works
+- **Chain Replication**
+  - Write operations flow from **head → tail**
+  - Read operations are served by any node
+- **Dirty/Clean Read Semantics**
+  - Newly written data is marked *dirty* until fully replicated
+  - Read operations filter out dirty data to guarantee consistency
+- **Distributed Subscriptions**
+  - Subscription ownership is deterministically assigned using modulo hashing
+  - Each node manages and notifies its assigned subscribers
+- **Backward Event Propagation**
+  - Events are broadcast only after replication is confirmed
 
-1. **Write Path**: Head receives write → replicates to next node → ... → tail confirms → ACKs flow back
-2. **Read Consistency**: Messages marked dirty until full replication; reads filter dirty data
-3. **Subscription Assignment**: Head node calculates `userID % nodeCount` to balance subscription load
-4. **Event Broadcasting**: After replication completes, each node broadcasts to its assigned subscribers
-5. **Node Roles**: 
-   - Head: handles writes, assigns subscriptions
-   - Middle: forwards replication, serves reads, broadcasts events
-   - Tail: confirms replication, serves reads, broadcasts events
+### Node Roles
+
+- **Head node**
+  - Accepts all write requests
+  - Assigns subscription responsibility
+- **Middle nodes**
+  - Forward replication
+  - Serve read requests
+  - Notify local subscribers
+- **Tail node**
+  - Finalizes replication
+  - Serves fully consistent reads
+
+The architecture does not include a separate control plane or centralized coordinator.
 
 ## Project Structure
 
-```
+```text
 razpravljalnica/
-├── api/                    # Protobuf definitions and generated code
-│   └── razpravljalnica.proto  # MessageBoard and ReplicationService
-├── internal/
-│   ├── storage/           # Thread-safe in-memory storage with dirty/clean tracking
-│   └── client/            # Reusable gRPC client service
+├── api/          # Protobuf definitions and generated code
+├── internal/     # Storage and shared client logic
 ├── cmd/
-│   ├── server/            # Chain replica node
-│   ├── cli/               # Command-line interface client
-│   └── tui/               # Terminal UI client (tview)
-├── tests/                  # Integration tests (chain replication, dirty/clean markers)
-├── Makefile               # Build automation
-└── bin/                   # Compiled binaries (generated)
-```
+│   ├── server/   # Chain replica node
+│   ├── cli/      # Command-line client
+│   └── tui/      # Terminal UI client
+├── tests/        # Integration and consistency tests
+├── Makefile      # Build automation
+└── bin/          # Compiled binaries
 
 ## Quick Start
 
@@ -142,74 +148,12 @@ go test -v -run TestBackwardBroadcastFlow       # Event propagation
 
 ## Implementation Details
 
-✅ Multi-user concurrent access  
-✅ Thread-safe in-memory storage  
-✅ Real-time subscriptions with streaming  
-✅ Chain replication (head writes, all nodes read)
-✅ Dirty/clean markers for read consistency
-✅ Distributed subscriptions with modulo-based load balancing
-✅ Backward event broadcasting (post-ACK)
-✅ Head-only subscription assignment (no control plane)
-✅ Multiple client interfaces (CLI, TUI)
-✅ Comprehensive unit and integration tests
-✅ Clean modular architecture
-
-## Architecture Highlights
-
-### Chain Replication Flow
-
-**Write Path:**
-1. Client sends write to head node
-2. Head creates message (marked dirty)
-3. Head forwards to next node via `ReplicateOperation`
-4. Middle node stores and forwards
-5. Tail stores and returns ACK
-6. ACKs flow backward through chain
-7. Each node marks message clean upon receiving downstream ACK
-8. Head returns success to client
-
-**Read Path:**
-- Reads allowed on all nodes
-- `ReadMessages()` filters out dirty messages
-- Ensures clients only see fully replicated data
-- Tail always has clean data (end of chain)
-
-### Subscription Assignment
-
-**Head Node Responsibilities:**
-- Only head processes `GetSubscriptionNode` requests
-- Calculates `targetNode = userID % nodeCount`
-- Generates subscription token
-- Returns node assignment to client
-
-**All Nodes:**
-- Accept `SubscribeTopic` connections
-- Store subscription tokens
-- Broadcast events to their assigned subscribers
-- Filter events based on user responsibility
-
-### Dirty/Clean Consistency
-
-**Storage Layer:**
-- `dirtyMsgs map[int64]bool` tracks unreplicated messages
-- `CreateMessage()` sets dirty flag
-- `MarkMessageClean()` removes flag after replication
-- `ReadMessages()` filters dirty data
-- `IsMessageDirty()` checks replication status
-
-**Replication Flow:**
-- Head: marks clean after receiving ACK from downstream
-- Middle: marks clean after receiving ACK from next node
-- Tail: marks clean immediately (no downstream)
-
-### Event Broadcasting
-
-After replication completes (ACK received):
-1. Tail broadcasts to local subscribers (if responsible)
-2. ACK flows to middle node
-3. Middle marks clean, broadcasts to local subscribers
-4. ACK flows to head
-5. Head marks clean, broadcasts to local subscribers
-6. Client receives write confirmation
-
-Each node broadcasts only to subscribers assigned to it based on modulo hashing.
+- Multi-user concurrent access  
+- Thread-safe in-memory storage  
+- Real-time subscriptions with streaming  
+- Chain replication (head writes, tail reads)
+- Distributed subscriptions with modulo-based load balancing
+- Backward event broadcasting (post-ACK)
+- Multiple client interfaces (CLI, TUI)
+- Comprehensive unit and integration tests
+- Clean modular architecture
