@@ -89,8 +89,8 @@ func NewMessageBoardServer(nodeID, address string, nextAddress string, chainNode
 		address:             address,
 		nextAddress:         nextAddress,
 		eventCounter:        0,
-		isHead:              nextAddress != "",
-		isTail:              nextAddress == "",
+		isHead:              nodeID == "head",
+		isTail:              nextAddress == "" || nodeID == "tail",
 		chainNodes:          chainNodes,
 		nodeIndex:           nodeIndex,
 	}
@@ -509,50 +509,65 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 		return nil, status.Errorf(codes.PermissionDenied, "subscription assignment only allowed on head")
 	}
 
-	// Generate subscription token
-	token := generateToken()
-
-	// Assign subscription node using round-robin load balancing across clients
-	targetNode := s.selectSubscriptionNode()
-
-	// Store token locally on head (dirty state initially)
-	s.tokensLock.Lock()
-	s.subscriptionTokens[token] = &SubscriptionInfo{
-		UserID:   req.UserId,
-		TopicIDs: req.TopicId,
-	}
-	s.tokensLock.Unlock()
-
-	// Replicate token distribution through the chain with dirty/clean consistency
-	seq := atomic.AddInt64(&s.sequenceCounter, 1)
-
-	if s.nextReplica != nil {
-		// Replicate through the chain so all nodes get the token
-		repReq := &api.ReplicationRequest{
-			Op:             api.OpType_OP_TOKEN,
-			Token:          token,
-			UserId:         req.UserId,
-			TopicIds:       req.TopicId,
-			SequenceNumber: seq,
-		}
-
-		resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "token replication failed: %v", err)
-		}
-
-		if resp.AckSequenceNumber != seq {
-			return nil, status.Errorf(codes.Internal, "token replication out of order")
-		}
-
-		log.Printf("Token %s replicated for user %d (sequence: %d)", token, req.UserId, seq)
+	// Allow multiple topics: iterate and create a per-topic token; return first for compatibility
+	if len(req.TopicId) == 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "no topic ids provided")
 	}
 
-	log.Printf("Generated subscription token for user %d assigned to node %s: %s", req.UserId, targetNode.Address, token)
+	var firstToken string
+	var firstNode *api.NodeInfo
+
+	for i, topicID := range req.TopicId {
+		// Generate subscription token for this topic
+		token := generateToken()
+
+		// Assign subscription node using round-robin load balancing across clients
+		targetNode := s.selectSubscriptionNode()
+
+		// Store token locally on head (dirty state initially)
+		s.tokensLock.Lock()
+		s.subscriptionTokens[token] = &SubscriptionInfo{
+			UserID:   req.UserId,
+			TopicIDs: []int64{topicID},
+		}
+		s.tokensLock.Unlock()
+
+		// Replicate token distribution through the chain with dirty/clean consistency
+		seq := atomic.AddInt64(&s.sequenceCounter, 1)
+
+		if s.nextReplica != nil {
+			// Replicate through the chain so all nodes get the token
+			repReq := &api.ReplicationRequest{
+				Op:             api.OpType_OP_TOKEN,
+				Token:          token,
+				UserId:         req.UserId,
+				TopicIds:       []int64{topicID},
+				SequenceNumber: seq,
+			}
+
+			resp, err := s.nextReplica.ReplicateOperation(ctx, repReq)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "token replication failed: %v", err)
+			}
+
+			if resp.AckSequenceNumber != seq {
+				return nil, status.Errorf(codes.Internal, "token replication out of order")
+			}
+
+			log.Printf("Token %s replicated for user %d topic %d (sequence: %d)", token, req.UserId, topicID, seq)
+		}
+
+		log.Printf("Generated subscription token for user %d assigned to node %s: %s (topic %d)", req.UserId, targetNode.Address, token, topicID)
+
+		if i == 0 {
+			firstToken = token
+			firstNode = targetNode
+		}
+	}
 
 	return &api.SubscriptionNodeResponse{
-		SubscribeToken: token,
-		Node:           targetNode,
+		SubscribeToken: firstToken,
+		Node:           firstNode,
 	}, nil
 }
 
@@ -660,6 +675,17 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 		return status.Errorf(codes.PermissionDenied, "token does not match user ID")
 	}
 
+	// Enforce exactly one topic per subscription request and token-topic match
+	if len(req.TopicId) != 1 {
+		return status.Errorf(codes.InvalidArgument, "exactly one topic id must be provided per subscription stream")
+	}
+	if len(subInfo.TopicIDs) != 1 {
+		return status.Errorf(codes.Internal, "subscription token is not bound to exactly one topic")
+	}
+	if req.TopicId[0] != subInfo.TopicIDs[0] {
+		return status.Errorf(codes.PermissionDenied, "token is not valid for requested topic")
+	}
+
 	// Create subscription channel
 	eventChan := make(chan *api.MessageEvent, 100)
 	token := req.SubscribeToken
@@ -668,35 +694,31 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 	s.subscribers[token] = eventChan
 	s.subscribersLock.Unlock()
 
-	// Register subscriptions
+	// Register subscription (single topic)
 	var ret struct{}
-	for _, topicID := range req.TopicId {
-		s.subscriptionStorage.CreateSubscription(req.UserId, topicID, &ret)
-	}
-
-	log.Printf("Subscription stored: user=%d topic=%d", req.UserId, req.TopicId)
+	s.subscriptionStorage.CreateSubscription(req.UserId, req.TopicId[0], &ret)
+	log.Printf("Subscription stored: user=%d topic=%d", req.UserId, req.TopicId[0])
 
 	// Send historical messages if requested
 	if req.FromMessageId > 0 {
-		for _, topicID := range req.TopicId {
-			var messages []*api.Message
-			if err := s.messageStorage.ReadMessages(topicID, &messages); err == nil {
-				for _, msg := range messages {
-					if msg.Id >= req.FromMessageId {
-						// Update like count
-						var likeCount int64
-						s.likeStorage.ReadLikes(msg.Id, &likeCount)
-						msg.Likes = int32(likeCount)
+		topicID := req.TopicId[0]
+		var messages []*api.Message
+		if err := s.messageStorage.ReadMessages(topicID, &messages); err == nil {
+			for _, msg := range messages {
+				if msg.Id >= req.FromMessageId {
+					// Update like count
+					var likeCount int64
+					s.likeStorage.ReadLikes(msg.Id, &likeCount)
+					msg.Likes = int32(likeCount)
 
-						event := &api.MessageEvent{
-							SequenceNumber: atomic.AddInt64(&s.sequenceCounter, 1),
-							Op:             api.OpType_OP_POST,
-							Message:        msg,
-							EventAt:        msg.CreatedAt,
-						}
-						if err := stream.Send(event); err != nil {
-							return err
-						}
+					event := &api.MessageEvent{
+						SequenceNumber: atomic.AddInt64(&s.sequenceCounter, 1),
+						Op:             api.OpType_OP_POST,
+						Message:        msg,
+						EventAt:        msg.CreatedAt,
+					}
+					if err := stream.Send(event); err != nil {
+						return err
 					}
 				}
 			}
@@ -709,7 +731,7 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 		delete(s.subscribers, token)
 		close(eventChan)
 		s.subscribersLock.Unlock()
-		log.Printf("Subscription stream closed for user %d topics: %v (reason: %v)", req.UserId, req.TopicId, ctx.Err())
+		log.Printf("Subscription stream closed for user %d topic: %d (reason: %v)", req.UserId, req.TopicId[0], ctx.Err())
 	}()
 
 	for {
