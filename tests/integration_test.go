@@ -159,8 +159,14 @@ func TestTopicCreation(t *testing.T) {
 		t.Errorf("Expected topic ID to be 1, got %d", topic.Id)
 	}
 
-	// List topics - reads allowed on all nodes
-	topics, err := cs.ListTopics()
+	// List topics - reads only allowed on tail
+	tailCS, err := client.NewClientService(srv.tailAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to create tail client: %v", err)
+	}
+	defer tailCS.Close()
+
+	topics, err := tailCS.ListTopics()
 	if err != nil {
 		t.Fatalf("Failed to list topics: %v", err)
 	}
@@ -205,8 +211,14 @@ func TestMessageLifecycle(t *testing.T) {
 		t.Errorf("Expected message topic ID %d, got %d", topic.Id, msg.TopicId)
 	}
 
-	// Get messages - reads allowed on all nodes
-	messages, err := cs.GetMessages(topic.Id, 0, 10)
+	// Get messages - reads only allowed on tail
+	tailCS, err := client.NewClientService(srv.tailAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to create tail client: %v", err)
+	}
+	defer tailCS.Close()
+
+	messages, err := tailCS.GetMessages(topic.Id, 0, 10)
 	if err != nil {
 		t.Fatalf("Failed to get messages: %v", err)
 	}
@@ -230,7 +242,7 @@ func TestMessageLifecycle(t *testing.T) {
 	}
 
 	// Verify message is deleted
-	messages, err = cs.GetMessages(topic.Id, 0, 10)
+	messages, err = tailCS.GetMessages(topic.Id, 0, 10)
 	if err != nil {
 		t.Fatalf("Failed to get messages after delete: %v", err)
 	}
@@ -567,8 +579,14 @@ func TestConcurrentOperations(t *testing.T) {
 
 	wg.Wait()
 
-	// Verify all messages were posted
-	messages, err := cs.GetMessages(topic.Id, 0, 100)
+	// Verify all messages were posted - reads only allowed on tail
+	tailCS, err := client.NewClientService(srv.tailAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to create tail client: %v", err)
+	}
+	defer tailCS.Close()
+
+	messages, err := tailCS.GetMessages(topic.Id, 0, 100)
 	if err != nil {
 		t.Fatalf("Failed to get messages: %v", err)
 	}

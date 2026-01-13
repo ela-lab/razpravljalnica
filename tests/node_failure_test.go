@@ -15,7 +15,7 @@ func TestNodeFailureRecovery(t *testing.T) {
 	defer cluster.stop()
 
 	// Create client service
-	svc, err := client.NewClientService(cluster.headAddr, 10*time.Second)
+	svc, err := client.NewClientService(cluster.getHeadAddress(t), 10*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client service: %v", err)
 	}
@@ -101,11 +101,11 @@ func TestNodeFailureRecovery(t *testing.T) {
 	}
 
 	// Identify which node has the subscription and kill it
-	// For simplicity, we'll kill the middle node since it's likely to have subscriptions
-	t.Log("Killing middle node to simulate failure...")
-	if cluster.middleCmd != nil && cluster.middleCmd.Process != nil {
-		if err := cluster.middleCmd.Process.Kill(); err != nil {
-			t.Logf("Warning: Failed to kill middle node: %v", err)
+	// For simplicity, we'll kill the node2 since it's likely to have subscriptions
+	t.Log("Killing node2 to simulate failure...")
+	if cluster.node2Cmd != nil && cluster.node2Cmd.Process != nil {
+		if err := cluster.node2Cmd.Process.Kill(); err != nil {
+			t.Logf("Warning: Failed to kill node2: %v", err)
 		}
 	}
 
@@ -138,7 +138,7 @@ func TestNodeFailureRecovery(t *testing.T) {
 
 	// Verify it's a different node (or at least we got a new token)
 	if assignedNode.Address == assignedNode2.Address && tokens[0] == tokens2[0] {
-		t.Log("Note: Same node and token - this may be expected if middle node wasn't the assigned node")
+		t.Log("Note: Same node and token - this may be expected if node2 wasn't the assigned node")
 	} else {
 		t.Logf("Successfully reassigned to different node or got new token")
 	}

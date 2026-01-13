@@ -12,21 +12,24 @@ import (
 	"github.com/ela-lab/razpravljalnica/internal/client"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // testClusterWithCP holds the control plane and servers for a test cluster
 type testClusterWithCP struct {
-	cpCmd      *exec.Cmd
-	headCmd    *exec.Cmd
-	middleCmd  *exec.Cmd
-	tailCmd    *exec.Cmd
-	cpAddr     string
-	headAddr   string
-	middleAddr string
-	tailAddr   string
+	cpCmd     *exec.Cmd
+	node1Cmd  *exec.Cmd
+	node2Cmd  *exec.Cmd
+	node3Cmd  *exec.Cmd
+	cpAddr    string
+	node1Addr string
+	node2Addr string
+	node3Addr string
 }
 
 // startTestClusterWithCP starts a 3-node cluster with a control plane
+// Nodes are started in order: node1, node2, node3
+// node1 becomes head (first registered), node3 becomes tail (last registered)
 func startTestClusterWithCP(t *testing.T) *testClusterWithCP {
 	// Find available ports for control plane
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -41,16 +44,16 @@ func startTestClusterWithCP(t *testing.T) *testClusterWithCP {
 	for i := 0; i < 3; i++ {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			t.Fatalf("Failed to find available port for server %d: %v", i, err)
+			t.Fatalf("Failed to find available port for server %d: %v", i+1, err)
 		}
 		ports[i] = listener.Addr().(*net.TCPAddr).Port
 		listener.Close()
 	}
 
 	cpAddr := fmt.Sprintf("localhost:%d", cpPort)
-	headAddr := fmt.Sprintf("localhost:%d", ports[0])
-	middleAddr := fmt.Sprintf("localhost:%d", ports[1])
-	tailAddr := fmt.Sprintf("localhost:%d", ports[2])
+	node1Addr := fmt.Sprintf("localhost:%d", ports[0])
+	node2Addr := fmt.Sprintf("localhost:%d", ports[1])
+	node3Addr := fmt.Sprintf("localhost:%d", ports[2])
 
 	// Start control plane
 	cpCmd := exec.Command("../bin/razpravljalnica-controlplane", "-p", fmt.Sprintf("%d", cpPort))
@@ -58,57 +61,64 @@ func startTestClusterWithCP(t *testing.T) *testClusterWithCP {
 		t.Fatalf("Failed to start control plane: %v", err)
 	}
 
-	// Start head node
-	headCmd := exec.Command("../bin/razpravljalnica-server",
+	// Wait for control plane to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Start node1 (will become head since it registers first)
+	node1Cmd := exec.Command("../bin/razpravljalnica-server",
 		"-p", fmt.Sprintf("%d", ports[0]),
-		"-id", "head",
-		"-nextPort", fmt.Sprintf("%d", ports[1]),
+		"-id", "node1",
 		"-control-plane", cpAddr)
-	if err := headCmd.Start(); err != nil {
+	if err := node1Cmd.Start(); err != nil {
 		cpCmd.Process.Kill()
-		t.Fatalf("Failed to start head node: %v", err)
+		t.Fatalf("Failed to start node1: %v", err)
 	}
 
-	// Start middle node
-	middleCmd := exec.Command("../bin/razpravljalnica-server",
+	// Wait for node1 to register
+	time.Sleep(500 * time.Millisecond)
+
+	// Start node2 (will become middle node)
+	node2Cmd := exec.Command("../bin/razpravljalnica-server",
 		"-p", fmt.Sprintf("%d", ports[1]),
-		"-id", "middle",
-		"-nextPort", fmt.Sprintf("%d", ports[2]),
+		"-id", "node2",
 		"-control-plane", cpAddr)
-	if err := middleCmd.Start(); err != nil {
+	if err := node2Cmd.Start(); err != nil {
 		cpCmd.Process.Kill()
-		headCmd.Process.Kill()
-		t.Fatalf("Failed to start middle node: %v", err)
+		node1Cmd.Process.Kill()
+		t.Fatalf("Failed to start node2: %v", err)
 	}
 
-	// Start tail node
-	tailCmd := exec.Command("../bin/razpravljalnica-server",
+	// Wait for node2 to register
+	time.Sleep(500 * time.Millisecond)
+
+	// Start node3 (will become tail since it registers last)
+	node3Cmd := exec.Command("../bin/razpravljalnica-server",
 		"-p", fmt.Sprintf("%d", ports[2]),
-		"-id", "tail",
+		"-id", "node3",
 		"-control-plane", cpAddr)
-	if err := tailCmd.Start(); err != nil {
+	if err := node3Cmd.Start(); err != nil {
 		cpCmd.Process.Kill()
-		headCmd.Process.Kill()
-		middleCmd.Process.Kill()
-		t.Fatalf("Failed to start tail node: %v", err)
+		node1Cmd.Process.Kill()
+		node2Cmd.Process.Kill()
+		t.Fatalf("Failed to start node3: %v", err)
 	}
 
 	tc := &testClusterWithCP{
-		cpCmd:      cpCmd,
-		headCmd:    headCmd,
-		middleCmd:  middleCmd,
-		tailCmd:    tailCmd,
-		cpAddr:     cpAddr,
-		headAddr:   headAddr,
-		middleAddr: middleAddr,
-		tailAddr:   tailAddr,
+		cpCmd:     cpCmd,
+		node1Cmd:  node1Cmd,
+		node2Cmd:  node2Cmd,
+		node3Cmd:  node3Cmd,
+		cpAddr:    cpAddr,
+		node1Addr: node1Addr,
+		node2Addr: node2Addr,
+		node3Addr: node3Addr,
 	}
 
-	// Wait for all services to start
+	// Wait for all services to start and register
 	time.Sleep(2 * time.Second)
 
 	// Verify all nodes can be reached
-	for _, addr := range []string{headAddr, middleAddr, tailAddr} {
+	for _, addr := range []string{node1Addr, node2Addr, node3Addr} {
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			tc.stop()
@@ -120,19 +130,43 @@ func startTestClusterWithCP(t *testing.T) *testClusterWithCP {
 	return tc
 }
 
+// getHeadAddress queries the control plane to find the current head node
+func (tc *testClusterWithCP) getHeadAddress(t *testing.T) string {
+	conn, err := grpc.NewClient(tc.cpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("Failed to connect to control plane: %v", err)
+	}
+	defer conn.Close()
+
+	client := api.NewControlPlaneClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resp, err := client.GetClusterState(ctx, &emptypb.Empty{})
+	if err != nil {
+		t.Fatalf("Failed to get cluster state: %v", err)
+	}
+
+	if resp.Head == nil {
+		t.Fatal("No head node found in cluster")
+	}
+
+	return resp.Head.Address
+}
+
 // stop stops the cluster and control plane
 func (tc *testClusterWithCP) stop() {
-	if tc.tailCmd != nil && tc.tailCmd.Process != nil {
-		tc.tailCmd.Process.Kill()
-		tc.tailCmd.Wait()
+	if tc.node3Cmd != nil && tc.node3Cmd.Process != nil {
+		tc.node3Cmd.Process.Kill()
+		tc.node3Cmd.Wait()
 	}
-	if tc.middleCmd != nil && tc.middleCmd.Process != nil {
-		tc.middleCmd.Process.Kill()
-		tc.middleCmd.Wait()
+	if tc.node2Cmd != nil && tc.node2Cmd.Process != nil {
+		tc.node2Cmd.Process.Kill()
+		tc.node2Cmd.Wait()
 	}
-	if tc.headCmd != nil && tc.headCmd.Process != nil {
-		tc.headCmd.Process.Kill()
-		tc.headCmd.Wait()
+	if tc.node1Cmd != nil && tc.node1Cmd.Process != nil {
+		tc.node1Cmd.Process.Kill()
+		tc.node1Cmd.Wait()
 	}
 	if tc.cpCmd != nil && tc.cpCmd.Process != nil {
 		tc.cpCmd.Process.Kill()
@@ -146,7 +180,11 @@ func TestTokenNodeDistribution(t *testing.T) {
 	cluster := startTestClusterWithCP(t)
 	defer cluster.stop()
 
-	svc, err := client.NewClientService(cluster.headAddr, 10*time.Second)
+	// Connect to the head node (node1, since it registered first)
+	headAddr := cluster.getHeadAddress(t)
+	t.Logf("Connecting to head node at %s", headAddr)
+
+	svc, err := client.NewClientService(headAddr, 10*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -215,8 +253,14 @@ func TestTokenNodeDistribution(t *testing.T) {
 
 // TestMultipleTopicSubscriptions tests subscribing to multiple topics with separate tokens
 func TestMultipleTopicSubscriptions(t *testing.T) {
-	// Setup: Create user and topics
-	svc, err := client.NewClientService("localhost:9001", 10*time.Second)
+	cluster := startTestClusterWithCP(t)
+	defer cluster.stop()
+
+	// Connect to the head node
+	headAddr := cluster.getHeadAddress(t)
+	t.Logf("Connecting to head node at %s", headAddr)
+
+	svc, err := client.NewClientService(headAddr, 10*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}

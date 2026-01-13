@@ -100,7 +100,7 @@ func NewMessageBoardServer(nodeID, address string, nextAddress string, isHead, i
 
 // CreateUser creates a new user
 func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUserRequest) (*api.User, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	userID := atomic.AddInt64(&s.userIDCounter, 1)
@@ -144,7 +144,10 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *api.CreateUser
 
 // GetUser returns user info by id
 func (s *MessageBoardServer) GetUser(ctx context.Context, req *api.GetUserRequest) (*api.User, error) {
-	// Reads allowed on all nodes - returns dirty/clean based on node state
+	// One-time reads only allowed on tail
+	if !s.isTail {
+		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+	}
 	var name string
 	if err := s.userStorage.ReadUser(req.UserId, &name); err != nil || name == "" {
 		return nil, status.Errorf(codes.NotFound, "user not found: %d", req.UserId)
@@ -155,7 +158,7 @@ func (s *MessageBoardServer) GetUser(ctx context.Context, req *api.GetUserReques
 
 // CreateTopic creates a new topic
 func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTopicRequest) (*api.Topic, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	topicID := atomic.AddInt64(&s.topicIDCounter, 1)
@@ -194,7 +197,7 @@ func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *api.CreateTop
 
 // PostMessage posts a new message to a topic
 func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessageRequest) (*api.Message, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	// Verify user exists
@@ -279,7 +282,7 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *api.PostMessa
 
 // UpdateMessage updates an existing message
 func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateMessageRequest) (*api.Message, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	// Get existing messages for the topic
@@ -353,7 +356,7 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *api.UpdateM
 
 // DeleteMessage deletes an existing message
 func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteMessageRequest) (*emptypb.Empty, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	// Get existing messages for the topic
@@ -418,7 +421,7 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *api.DeleteM
 
 // LikeMessage adds a like to a message
 func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessageRequest) (*api.Message, error) {
-	if s.nodeID != "head" {
+	if !s.isHead {
 		return nil, status.Errorf(codes.PermissionDenied, "writes only allowed on head")
 	}
 	// Get existing messages for the topic
@@ -605,7 +608,10 @@ func (s *MessageBoardServer) RegisterSubscriptionToken(ctx context.Context, req 
 
 // ListTopics returns all topics
 func (s *MessageBoardServer) ListTopics(ctx context.Context, req *emptypb.Empty) (*api.ListTopicsResponse, error) {
-	// Reads allowed on all nodes - returns dirty/clean based on node state
+	// One-time reads only allowed on tail
+	if !s.isTail {
+		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+	}
 	var topics []*api.Topic
 	if err := s.topicStorage.ReadTopics(&topics); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read topics: %v", err)
@@ -618,7 +624,10 @@ func (s *MessageBoardServer) ListTopics(ctx context.Context, req *emptypb.Empty)
 
 // ListSubscriptions returns subscriptions for a user
 func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.ListSubscriptionsRequest) (*api.ListSubscriptionsResponse, error) {
-	// Reads allowed on all nodes - returns dirty/clean based on node state
+	// One-time reads only allowed on tail
+	if !s.isTail {
+		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+	}
 	resp := &api.ListSubscriptionsResponse{}
 	resp.TopicId = make([]int64, 0)
 	if req == nil {
@@ -635,19 +644,17 @@ func (s *MessageBoardServer) ListSubscriptions(ctx context.Context, req *api.Lis
 
 // GetMessages returns messages from a topic
 func (s *MessageBoardServer) GetMessages(ctx context.Context, req *api.GetMessagesRequest) (*api.GetMessagesResponse, error) {
-	// Reads allowed on all nodes - returns only clean (committed) data
+	// One-time reads only allowed on tail
+	if !s.isTail {
+		return nil, status.Errorf(codes.PermissionDenied, "reads only allowed on tail")
+	}
 	var messages []*api.Message
 	if err := s.messageStorage.ReadMessages(req.TopicId, &messages); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read messages: %v", err)
 	}
 
-	// Filter out dirty (uncommitted) messages - only return clean data
-	var cleanMessages []*api.Message
-	for _, msg := range messages {
-		if !s.dirtyBits.IsMessageDirty(req.TopicId, msg.Id) {
-			cleanMessages = append(cleanMessages, msg)
-		}
-	}
+	// All messages on tail are committed - no dirty filtering needed
+	cleanMessages := messages
 
 	// Update like counts for clean messages
 	for _, msg := range cleanMessages {
@@ -852,10 +859,14 @@ func (s *MessageBoardServer) extractTopicIDFromReplication(req *api.ReplicationR
 }
 
 // registerAndHeartbeat registers with control plane and sends periodic heartbeats
-func (s *MessageBoardServer) registerAndHeartbeat(isHead, isTail bool) {
+func (s *MessageBoardServer) registerAndHeartbeat(initialIsHead, initialIsTail bool) {
 	if s.controlPlaneClient == nil {
 		return
 	}
+
+	// Initialize the server role from startup flags (may be updated later by control plane)
+	s.isHead = initialIsHead
+	s.isTail = initialIsTail
 
 	register := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -866,14 +877,16 @@ func (s *MessageBoardServer) registerAndHeartbeat(isHead, isTail bool) {
 				NodeId:  s.nodeID,
 				Address: s.address,
 			},
-			IsHead: isHead,
-			IsTail: isTail,
+			IsHead:             s.isHead,
+			IsTail:             s.isTail,
+			CurrentNextAddress: s.nextAddress,
+			CurrentPrevAddress: "", // Server doesn't track prevAddress
 		})
 
 		if err != nil {
 			log.Printf("Failed to register with control plane: %v", err)
 		} else {
-			log.Printf("Registered with control plane (head: %v, tail: %v)", isHead, isTail)
+			//log.Printf("Registered with control plane (head: %v, tail: %v)", s.isHead, s.isTail)
 		}
 	}
 
@@ -929,13 +942,16 @@ func (s *MessageBoardServer) syncResponsibility() {
 
 	if myIndex >= 0 {
 		s.responsibilityLock.Lock()
+		changed := s.myModuloIndex != myIndex || s.totalNodes != totalNodes
 		s.myModuloIndex = myIndex
 		s.totalNodes = totalNodes
 		s.lastResponsibilityUpdate = time.Now()
 		s.controlPlaneAvailable = true
 		s.responsibilityLock.Unlock()
 
-		log.Printf("Updated responsibility: myIndex=%d, totalNodes=%d (control plane available)", myIndex, totalNodes)
+		if changed {
+			log.Printf("Updated responsibility: myIndex=%d, totalNodes=%d", myIndex, totalNodes)
+		}
 	} else {
 		log.Printf("Node not found in responsibility assignments")
 	}
@@ -947,8 +963,16 @@ func (s *MessageBoardServer) UpdateChainTopology(ctx context.Context, req *api.U
 	log.Printf("[%s] [Node %s] Received chain topology update: prev=%s, next=%s, head=%v, tail=%v",
 		now, s.nodeID, req.NewPrevAddress, req.NewNextAddress, req.IsHead, req.IsTail)
 
-	// Close existing next replica connection if any
-	if s.nextReplica != nil {
+	// Update local role flags from control plane
+	s.isHead = req.IsHead
+	s.isTail = req.IsTail
+
+	// Track if topology actually changed
+	nextChanged := s.nextAddress != req.NewNextAddress
+	prevProvided := req.NewPrevAddress != "" && req.NewPrevAddress != "none"
+
+	// Close existing next replica connection if next changed
+	if nextChanged && s.nextReplica != nil {
 		if s.nextReplicaConn != nil {
 			s.nextReplicaConn.Close()
 		}
@@ -959,22 +983,25 @@ func (s *MessageBoardServer) UpdateChainTopology(ctx context.Context, req *api.U
 	// Update next address
 	s.nextAddress = req.NewNextAddress
 
-	// Connect to new successor if provided
-	if s.nextAddress != "" && s.nextAddress != "none" {
-		conn, err := grpc.NewClient(s.nextAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			log.Printf("[%s] [Node %s] Failed to connect to new successor %s: %v", now, s.nodeID, s.nextAddress, err)
-			return nil, status.Errorf(codes.Internal, "failed to connect to successor: %v", err)
+	// Connect to new successor if next changed
+	if nextChanged {
+		if s.nextAddress != "" && s.nextAddress != "none" {
+			conn, err := grpc.NewClient(s.nextAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				log.Printf("[%s] [Node %s] Failed to connect to new successor %s: %v", now, s.nodeID, s.nextAddress, err)
+				return nil, status.Errorf(codes.Internal, "failed to connect to successor: %v", err)
+			}
+			s.nextReplicaConn = conn
+			s.nextReplica = api.NewReplicationServiceClient(conn)
+			log.Printf("[%s] [Node %s] Topology updated: now replicates to %s", now, s.nodeID, s.nextAddress)
+		} else {
+			log.Printf("[%s] [Node %s] Topology updated: now at tail", now, s.nodeID)
 		}
-		s.nextReplicaConn = conn
-		s.nextReplica = api.NewReplicationServiceClient(conn)
-		log.Printf("[%s] [Node %s] Connected to new successor: %s", now, s.nodeID, s.nextAddress)
-	} else {
-		log.Printf("[%s] [Node %s] No successor (tail node)", now, s.nodeID)
 	}
 
-	// Sync data from predecessor if available
-	if req.NewPrevAddress != "" && req.NewPrevAddress != "none" {
+	// Sync data from predecessor if provided (regardless of next change)
+	if prevProvided {
+		log.Printf("[%s] [Node %s] New predecessor detected, triggering catchup from %s", now, s.nodeID, req.NewPrevAddress)
 		go s.catchupFromPredecessor(req.NewPrevAddress)
 	}
 
@@ -1245,12 +1272,53 @@ func StartServer(id string, url string, nextAddress string, controlPlaneAddr str
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	// Determine if we're head or tail based on topology
-	isHead := (nextAddress != "")
-	isTail := (nextAddress == "")
+	// Determine initial role without relying on node IDs
+	isHead := nextAddress != "" // provisional: a node with a successor could be head
+	isTail := nextAddress == ""
+
+	// In standalone mode (no control plane), a single node should be both head and tail
+	if controlPlaneAddr == "" && nextAddress == "" {
+		isHead = true
+		isTail = true
+	}
+
+	var controlPlaneConn *grpc.ClientConn
+	var controlPlaneClient api.ControlPlaneClient
+
+	// If a control plane is available, ask it for the current head/tail before starting
+	if controlPlaneAddr != "" {
+		controlPlaneConn, err = grpc.NewClient(controlPlaneAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Fatalf("failed to connect to control plane: %v", err)
+		}
+		controlPlaneClient = api.NewControlPlaneClient(controlPlaneConn)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		state, stateErr := controlPlaneClient.GetClusterState(ctx, &emptypb.Empty{})
+		cancel()
+		if stateErr != nil {
+			log.Printf("Failed to query control plane for initial role (defaulting to head:%v tail:%v): %v", isHead, isTail, stateErr)
+		} else {
+			// If control plane already knows a head, follow that; otherwise first registrant becomes head
+			if state.Head != nil {
+				isHead = state.Head.NodeId == id
+			} else {
+				isHead = true
+			}
+
+			// Tail is either known by control plane or derived from nextAddress
+			if state.Tail != nil {
+				isTail = state.Tail.NodeId == id
+			} else {
+				isTail = nextAddress == ""
+			}
+		}
+	}
 
 	grpcServer := grpc.NewServer()
 	server := NewMessageBoardServer(id, url, nextAddress, isHead, isTail)
+	server.controlPlaneConn = controlPlaneConn
+	server.controlPlaneClient = controlPlaneClient
 
 	api.RegisterMessageBoardServer(grpcServer, server)
 	api.RegisterReplicationServiceServer(grpcServer, server)
@@ -1266,16 +1334,8 @@ func StartServer(id string, url string, nextAddress string, controlPlaneAddr str
 		server.nextReplica = api.NewReplicationServiceClient(conn)
 	}
 
-	// Connect to control plane if address provided
-	if controlPlaneAddr != "" {
-		conn, err := grpc.NewClient(controlPlaneAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			log.Fatalf("failed to connect to control plane: %v", err)
-		}
-		server.controlPlaneConn = conn
-		server.controlPlaneClient = api.NewControlPlaneClient(conn)
-
-		// Register with control plane and start heartbeat
+	// Register with control plane and start heartbeat if connected
+	if server.controlPlaneClient != nil {
 		go server.registerAndHeartbeat(isHead, isTail)
 	}
 

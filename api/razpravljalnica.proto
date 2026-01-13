@@ -258,6 +258,8 @@ message RegisterNodeRequest {
   NodeInfo node = 1;
   bool is_head = 2;  // True if this is the head node
   bool is_tail = 3;  // True if this is the tail node
+  string current_next_address = 4;  // Node's current next address for drift detection
+  string current_prev_address = 5;  // Node's current prev address for drift detection
 }
 
 message SubscriptionResponsibilityResponse {
