@@ -679,29 +679,30 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 	ctx, cancel := context.WithCancel(ctx)
 	t.subCancel = cancel
 
-	// Get subscription tokens for all topics
-	tokens, _, err := t.service.GetSubscriptionNodesForTopics(t.currentUser, topicIDs)
-	if err != nil {
-		t.showStatus(fmt.Sprintf("[red]Subscription error: %v[white]", err))
-		return
-	}
-
-	// Build subscriptions list
+	// Build subscriptions list - get token and node for each topic
 	subscriptions := make([]struct {
 		TopicID   int64
 		Token     string
 		FromMsgID int64
+		NodeAddr  string
 	}, len(topicIDs))
 
 	for i, topicID := range topicIDs {
+		token, node, err := t.service.GetSubscriptionNode(t.currentUser, topicID)
+		if err != nil {
+			t.showStatus(fmt.Sprintf("[red]Subscription error for topic %d: %v[white]", topicID, err))
+			return
+		}
 		subscriptions[i] = struct {
 			TopicID   int64
 			Token     string
 			FromMsgID int64
+			NodeAddr  string
 		}{
 			TopicID:   topicID,
-			Token:     tokens[i],
+			Token:     token,
 			FromMsgID: 0,
+			NodeAddr:  node.Address,
 		}
 	}
 

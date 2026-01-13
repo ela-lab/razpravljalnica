@@ -513,21 +513,44 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *api.S
 		return nil, status.Errorf(codes.PermissionDenied, "subscription assignment only allowed on head")
 	}
 
+	// Ask control plane to assign a node using round-robin
+	targetNode := s.assignSubscriptionNode(ctx, req.UserId, req.TopicId)
+
 	// Generate subscription token
 	token := generateToken()
 
-	// Store subscription info - ONE token for ONE topic
-	s.tokensLock.Lock()
-	s.subscriptionTokens[token] = &SubscriptionInfo{
-		UserID:  req.UserId,
-		TopicID: req.TopicId,
+	// If the assigned node is this node, store the token locally
+	if targetNode.NodeId == s.nodeID {
+		s.tokensLock.Lock()
+		s.subscriptionTokens[token] = &SubscriptionInfo{
+			UserID:  req.UserId,
+			TopicID: req.TopicId,
+		}
+		s.tokensLock.Unlock()
+		log.Printf("Generated subscription token for user %d, topic %d: %s (local)", req.UserId, req.TopicId, token)
+	} else {
+		// Connect to the assigned node and have it create the token
+		nodeConn, err := grpc.NewClient(targetNode.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("Failed to connect to assigned node %s: %v", targetNode.Address, err)
+			return nil, status.Errorf(codes.Internal, "failed to connect to assigned node")
+		}
+		defer nodeConn.Close()
+
+		nodeClient := api.NewMessageBoardClient(nodeConn)
+
+		// Use RegisterSubscriptionToken RPC to have the node create the token
+		_, err = nodeClient.RegisterSubscriptionToken(ctx, &api.RegisterSubscriptionTokenRequest{
+			Token:   token,
+			UserId:  req.UserId,
+			TopicId: req.TopicId,
+		})
+		if err != nil {
+			log.Printf("Failed to register token on node %s: %v", targetNode.NodeId, err)
+			return nil, status.Errorf(codes.Internal, "failed to register token on assigned node")
+		}
+		log.Printf("Generated subscription token for user %d, topic %d: %s (on node %s)", req.UserId, req.TopicId, token, targetNode.NodeId)
 	}
-	s.tokensLock.Unlock()
-
-	log.Printf("Generated subscription token for user %d, topic %d: %s", req.UserId, req.TopicId, token)
-
-	// Ask control plane to assign a node using round-robin
-	targetNode := s.assignSubscriptionNode(ctx, req.UserId, req.TopicId)
 
 	return &api.SubscriptionNodeResponse{
 		SubscribeToken: token,
@@ -563,6 +586,21 @@ func (s *MessageBoardServer) assignSubscriptionNode(ctx context.Context, userID,
 		userID, topicID, resp.Node.NodeId)
 
 	return resp.Node
+}
+
+// RegisterSubscriptionToken registers a subscription token on this node (called by head)
+func (s *MessageBoardServer) RegisterSubscriptionToken(ctx context.Context, req *api.RegisterSubscriptionTokenRequest) (*emptypb.Empty, error) {
+	s.tokensLock.Lock()
+	defer s.tokensLock.Unlock()
+
+	s.subscriptionTokens[req.Token] = &SubscriptionInfo{
+		UserID:  req.UserId,
+		TopicID: req.TopicId,
+	}
+
+	log.Printf("Registered subscription token for user %d, topic %d: %s", req.UserId, req.TopicId, req.Token)
+
+	return &emptypb.Empty{}, nil
 }
 
 // ListTopics returns all topics
@@ -725,14 +763,22 @@ func (s *MessageBoardServer) SubscribeTopic(req *api.SubscribeTopicRequest, stre
 // broadcastEvent sends an event to all relevant subscribers
 func (s *MessageBoardServer) broadcastEvent(event *api.MessageEvent, topicID int64) {
 	s.subscribersLock.RLock()
-	defer s.subscribersLock.RUnlock()
-
+	subscribers := make(map[string]chan *api.MessageEvent)
 	for token, eventChan := range s.subscribers {
-		// Check if this subscriber is subscribed to this topic
-		s.tokensLock.RLock()
-		subInfo, exists := s.subscriptionTokens[token]
-		s.tokensLock.RUnlock()
+		subscribers[token] = eventChan
+	}
+	s.subscribersLock.RUnlock()
 
+	s.tokensLock.RLock()
+	tokens := make(map[string]*SubscriptionInfo)
+	for token, subInfo := range s.subscriptionTokens {
+		tokens[token] = subInfo
+	}
+	s.tokensLock.RUnlock()
+
+	for token, eventChan := range subscribers {
+		// Check if this subscriber is subscribed to this topic
+		subInfo, exists := tokens[token]
 		if !exists {
 			continue
 		}
@@ -742,16 +788,13 @@ func (s *MessageBoardServer) broadcastEvent(event *api.MessageEvent, topicID int
 			continue
 		}
 
-		// Check if this node is responsible for this user's broadcasts
-		if !s.isResponsibleForUser(subInfo.UserID) {
-			continue
-		}
-
+		// Send the event - since we have a token for this subscription, we should broadcast
+		// regardless of the user's modulo responsibility
+		// The modulo responsibility is only for user-level subscriptions, not token-based ones
 		select {
 		case eventChan <- event:
 		case <-time.After(100 * time.Millisecond):
-			// Skip if channel is full
-			log.Printf("Skipping event for slow subscriber")
+			log.Printf("Warning: subscriber channel full for token %s, dropping event", token)
 		}
 	}
 }

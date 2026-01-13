@@ -20,18 +20,19 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MessageBoard_CreateUser_FullMethodName          = "/razpravljalnica.MessageBoard/CreateUser"
-	MessageBoard_GetUser_FullMethodName             = "/razpravljalnica.MessageBoard/GetUser"
-	MessageBoard_ListSubscriptions_FullMethodName   = "/razpravljalnica.MessageBoard/ListSubscriptions"
-	MessageBoard_CreateTopic_FullMethodName         = "/razpravljalnica.MessageBoard/CreateTopic"
-	MessageBoard_PostMessage_FullMethodName         = "/razpravljalnica.MessageBoard/PostMessage"
-	MessageBoard_UpdateMessage_FullMethodName       = "/razpravljalnica.MessageBoard/UpdateMessage"
-	MessageBoard_DeleteMessage_FullMethodName       = "/razpravljalnica.MessageBoard/DeleteMessage"
-	MessageBoard_LikeMessage_FullMethodName         = "/razpravljalnica.MessageBoard/LikeMessage"
-	MessageBoard_GetSubscriptionNode_FullMethodName = "/razpravljalnica.MessageBoard/GetSubscriptionNode"
-	MessageBoard_ListTopics_FullMethodName          = "/razpravljalnica.MessageBoard/ListTopics"
-	MessageBoard_GetMessages_FullMethodName         = "/razpravljalnica.MessageBoard/GetMessages"
-	MessageBoard_SubscribeTopic_FullMethodName      = "/razpravljalnica.MessageBoard/SubscribeTopic"
+	MessageBoard_CreateUser_FullMethodName                = "/razpravljalnica.MessageBoard/CreateUser"
+	MessageBoard_GetUser_FullMethodName                   = "/razpravljalnica.MessageBoard/GetUser"
+	MessageBoard_ListSubscriptions_FullMethodName         = "/razpravljalnica.MessageBoard/ListSubscriptions"
+	MessageBoard_CreateTopic_FullMethodName               = "/razpravljalnica.MessageBoard/CreateTopic"
+	MessageBoard_PostMessage_FullMethodName               = "/razpravljalnica.MessageBoard/PostMessage"
+	MessageBoard_UpdateMessage_FullMethodName             = "/razpravljalnica.MessageBoard/UpdateMessage"
+	MessageBoard_DeleteMessage_FullMethodName             = "/razpravljalnica.MessageBoard/DeleteMessage"
+	MessageBoard_LikeMessage_FullMethodName               = "/razpravljalnica.MessageBoard/LikeMessage"
+	MessageBoard_GetSubscriptionNode_FullMethodName       = "/razpravljalnica.MessageBoard/GetSubscriptionNode"
+	MessageBoard_RegisterSubscriptionToken_FullMethodName = "/razpravljalnica.MessageBoard/RegisterSubscriptionToken"
+	MessageBoard_ListTopics_FullMethodName                = "/razpravljalnica.MessageBoard/ListTopics"
+	MessageBoard_GetMessages_FullMethodName               = "/razpravljalnica.MessageBoard/GetMessages"
+	MessageBoard_SubscribeTopic_FullMethodName            = "/razpravljalnica.MessageBoard/SubscribeTopic"
 )
 
 // MessageBoardClient is the client API for MessageBoard service.
@@ -56,6 +57,8 @@ type MessageBoardClient interface {
 	LikeMessage(ctx context.Context, in *LikeMessageRequest, opts ...grpc.CallOption) (*Message, error)
 	// Request a node to which a subscription can be opened.
 	GetSubscriptionNode(ctx context.Context, in *SubscriptionNodeRequest, opts ...grpc.CallOption) (*SubscriptionNodeResponse, error)
+	// Internal RPC: Register a subscription token on a node (called by head)
+	RegisterSubscriptionToken(ctx context.Context, in *RegisterSubscriptionTokenRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Returns all the topics
 	ListTopics(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListTopicsResponse, error)
 	// Returns messages in a topic
@@ -162,6 +165,16 @@ func (c *messageBoardClient) GetSubscriptionNode(ctx context.Context, in *Subscr
 	return out, nil
 }
 
+func (c *messageBoardClient) RegisterSubscriptionToken(ctx context.Context, in *RegisterSubscriptionTokenRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, MessageBoard_RegisterSubscriptionToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *messageBoardClient) ListTopics(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListTopicsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListTopicsResponse)
@@ -223,6 +236,8 @@ type MessageBoardServer interface {
 	LikeMessage(context.Context, *LikeMessageRequest) (*Message, error)
 	// Request a node to which a subscription can be opened.
 	GetSubscriptionNode(context.Context, *SubscriptionNodeRequest) (*SubscriptionNodeResponse, error)
+	// Internal RPC: Register a subscription token on a node (called by head)
+	RegisterSubscriptionToken(context.Context, *RegisterSubscriptionTokenRequest) (*emptypb.Empty, error)
 	// Returns all the topics
 	ListTopics(context.Context, *emptypb.Empty) (*ListTopicsResponse, error)
 	// Returns messages in a topic
@@ -265,6 +280,9 @@ func (UnimplementedMessageBoardServer) LikeMessage(context.Context, *LikeMessage
 }
 func (UnimplementedMessageBoardServer) GetSubscriptionNode(context.Context, *SubscriptionNodeRequest) (*SubscriptionNodeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSubscriptionNode not implemented")
+}
+func (UnimplementedMessageBoardServer) RegisterSubscriptionToken(context.Context, *RegisterSubscriptionTokenRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterSubscriptionToken not implemented")
 }
 func (UnimplementedMessageBoardServer) ListTopics(context.Context, *emptypb.Empty) (*ListTopicsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListTopics not implemented")
@@ -458,6 +476,24 @@ func _MessageBoard_GetSubscriptionNode_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MessageBoard_RegisterSubscriptionToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterSubscriptionTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageBoardServer).RegisterSubscriptionToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageBoard_RegisterSubscriptionToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageBoardServer).RegisterSubscriptionToken(ctx, req.(*RegisterSubscriptionTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MessageBoard_ListTopics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
@@ -547,6 +583,10 @@ var MessageBoard_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSubscriptionNode",
 			Handler:    _MessageBoard_GetSubscriptionNode_Handler,
+		},
+		{
+			MethodName: "RegisterSubscriptionToken",
+			Handler:    _MessageBoard_RegisterSubscriptionToken_Handler,
 		},
 		{
 			MethodName: "ListTopics",

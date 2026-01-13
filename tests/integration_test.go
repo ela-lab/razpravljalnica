@@ -453,9 +453,16 @@ func TestMultipleTopicSubscription(t *testing.T) {
 	topic2, _ := cs.CreateTopic("Topic 2")
 
 	// Get subscription tokens for both topics
-	tokens, _, err := cs.GetSubscriptionNodesForTopics(user.Id, []int64{topic1.Id, topic2.Id})
-	if err != nil {
-		t.Fatalf("Failed to get subscription tokens: %v", err)
+	tokens := make([]string, 2)
+	nodeAddrs := make([]string, 2)
+
+	for i, topicID := range []int64{topic1.Id, topic2.Id} {
+		token, node, err := cs.GetSubscriptionNode(user.Id, topicID)
+		if err != nil {
+			t.Fatalf("Failed to get subscription token for topic %d: %v", topicID, err)
+		}
+		tokens[i] = token
+		nodeAddrs[i] = node.Address
 	}
 
 	// Start subscription
@@ -472,17 +479,20 @@ func TestMultipleTopicSubscription(t *testing.T) {
 			TopicID   int64
 			Token     string
 			FromMsgID int64
+			NodeAddr  string
 		}, 2)
 		subscriptions[0] = struct {
 			TopicID   int64
 			Token     string
 			FromMsgID int64
-		}{TopicID: topic1.Id, Token: tokens[0], FromMsgID: 0}
+			NodeAddr  string
+		}{TopicID: topic1.Id, Token: tokens[0], FromMsgID: 0, NodeAddr: nodeAddrs[0]}
 		subscriptions[1] = struct {
 			TopicID   int64
 			Token     string
 			FromMsgID int64
-		}{TopicID: topic2.Id, Token: tokens[1], FromMsgID: 0}
+			NodeAddr  string
+		}{TopicID: topic2.Id, Token: tokens[1], FromMsgID: 0, NodeAddr: nodeAddrs[1]}
 
 		cs.StreamMultipleSubscriptions(ctx, user.Id, subscriptions, func(event *api.MessageEvent) error {
 			select {

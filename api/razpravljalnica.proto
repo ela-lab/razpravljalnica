@@ -81,6 +81,9 @@ service  MessageBoard{
   // Request a node to which a subscription can be opened.
   rpc GetSubscriptionNode(SubscriptionNodeRequest) returns (SubscriptionNodeResponse);
 
+  // Internal RPC: Register a subscription token on a node (called by head)
+  rpc RegisterSubscriptionToken(RegisterSubscriptionTokenRequest) returns (google.protobuf.Empty);
+
   // Reads allowed on all nodes (distributed reads)
   // Optimization: Records marked dirty on write, clean on ACK
   // If dirty record requested, node may fetch clean version from tail
@@ -179,6 +182,12 @@ message SubscriptionNodeRequest {
 message SubscriptionNodeResponse {
   string subscribe_token = 1; // subscription token to be presented to the returned node
   NodeInfo node = 2;
+}
+
+message RegisterSubscriptionTokenRequest {
+  string token = 1;
+  int64 user_id = 2;
+  int64 topic_id = 3;
 }
 
 message MessageEvent {

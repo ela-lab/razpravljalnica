@@ -218,33 +218,37 @@ func RunCLI() error {
 							return fmt.Errorf("at least one topic ID must be provided")
 						}
 
-						// Get subscription tokens for all topics
-						tokens, node, err := service.GetSubscriptionNodesForTopics(userID, topicIDs)
-						if err != nil {
-							return fmt.Errorf("failed to get subscriptions: %w", err)
-						}
-
-						fmt.Printf("Subscribed to topics %v on node %s\n", topicIDs, node.Address)
-						fmt.Println("Listening for events from all topics (Ctrl+C to stop)...")
+						// Get subscription tokens and nodes for all topics
+						fmt.Printf("Getting subscriptions for topics %v...\n", topicIDs)
 
 						// Build subscriptions list
 						subscriptions := make([]struct {
 							TopicID   int64
 							Token     string
 							FromMsgID int64
+							NodeAddr  string
 						}, len(topicIDs))
 
 						for i, topicID := range topicIDs {
+							token, node, err := service.GetSubscriptionNode(userID, topicID)
+							if err != nil {
+								return fmt.Errorf("failed to get subscription for topic %d: %w", topicID, err)
+							}
 							subscriptions[i] = struct {
 								TopicID   int64
 								Token     string
 								FromMsgID int64
+								NodeAddr  string
 							}{
 								TopicID:   topicID,
-								Token:     tokens[i],
+								Token:     token,
 								FromMsgID: fromMessageID,
+								NodeAddr:  node.Address,
 							}
+							fmt.Printf("  Topic %d -> Node %s\n", topicID, node.Address)
 						}
+
+						fmt.Println("Listening for events from all topics (Ctrl+C to stop)...")
 
 						// Stream events from all subscriptions
 						return service.StreamMultipleSubscriptions(ctx, userID, subscriptions, func(event *api.MessageEvent) error {

@@ -31,21 +31,26 @@ type ControlPlaneServer struct {
 
 	// Subscription round-robin counter
 	subscriptionRRCounter int64
+
+	// Subscription tracking: subscription ID -> node ID
+	subscriptionAssignments map[string]string // "userID:topicID" -> nodeID
 }
 
 // NodeState tracks node info and health
 type NodeState struct {
-	Info          *api.NodeInfo
-	LastHeartbeat time.Time
-	IsHead        bool
-	IsTail        bool
+	Info                  *api.NodeInfo
+	LastHeartbeat         time.Time
+	IsHead                bool
+	IsTail                bool
+	AssignedSubscriptions []string // Track subscriptions assigned to this node
 }
 
 // NewControlPlaneServer creates a new control plane server
 func NewControlPlaneServer() *ControlPlaneServer {
 	cp := &ControlPlaneServer{
-		nodes:     make(map[string]*NodeState),
-		nodeOrder: []string{},
+		nodes:                   make(map[string]*NodeState),
+		nodeOrder:               []string{},
+		subscriptionAssignments: make(map[string]string),
 	}
 
 	// Start background health checker
@@ -65,7 +70,8 @@ func (cp *ControlPlaneServer) RegisterNode(ctx context.Context, req *api.Registe
 	state, exists := cp.nodes[nodeID]
 	if !exists {
 		state = &NodeState{
-			Info: req.Node,
+			Info:                  req.Node,
+			AssignedSubscriptions: []string{},
 		}
 		cp.nodes[nodeID] = state
 		cp.lastNodeUpdate = time.Now()
@@ -306,19 +312,40 @@ func (cp *ControlPlaneServer) ReportNodeFailure(ctx context.Context, req *api.Re
 
 // AssignSubscriptionNode assigns a node for a subscription using round-robin
 func (cp *ControlPlaneServer) AssignSubscriptionNode(ctx context.Context, req *api.AssignSubscriptionNodeRequest) (*api.AssignSubscriptionNodeResponse, error) {
-	cp.mu.RLock()
-	defer cp.mu.RUnlock()
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
 
 	if len(cp.nodeOrder) == 0 {
 		return nil, fmt.Errorf("no nodes available in cluster")
 	}
 
-	// Use atomic counter for round-robin assignment per subscription
+	// Create subscription identifier
+	subID := fmt.Sprintf("%d:%d", req.UserId, req.TopicId)
+
+	// Check if this subscription was already assigned - return the same assignment
+	if nodeID, hadAssignment := cp.subscriptionAssignments[subID]; hadAssignment {
+		nodeState, exists := cp.nodes[nodeID]
+		if exists {
+			log.Printf("Control plane: Returning existing assignment for subscription %s -> node %s", subID, nodeID)
+			return &api.AssignSubscriptionNodeResponse{
+				Node: nodeState.Info,
+			}, nil
+		}
+		// If the assigned node no longer exists, fall through to assign a new one
+		log.Printf("Control plane: Previous assignment for subscription %s to node %s no longer available, reassigning", subID, nodeID)
+		delete(cp.subscriptionAssignments, subID)
+	}
+
+	// Assign to a new node using round-robin
 	idx := atomic.AddInt64(&cp.subscriptionRRCounter, 1) - 1
 	nodeIndex := idx % int64(len(cp.nodeOrder))
 
 	nodeID := cp.nodeOrder[nodeIndex]
 	nodeState := cp.nodes[nodeID]
+
+	// Track assignment
+	cp.subscriptionAssignments[subID] = nodeID
+	nodeState.AssignedSubscriptions = append(nodeState.AssignedSubscriptions, subID)
 
 	log.Printf("Control plane: Assigned subscription (user=%d, topic=%d) to node %s (index %d/%d)",
 		req.UserId, req.TopicId, nodeID, nodeIndex, len(cp.nodeOrder))
@@ -348,8 +375,15 @@ func (cp *ControlPlaneServer) healthCheckLoop() {
 
 		// Remove stale nodes and reconstruct chain
 		for _, nodeID := range staleNodes {
+			state := cp.nodes[nodeID]
 			log.Printf("Control plane: Removing stale node %s (dead for %v)",
 				nodeID, timeout)
+
+			// Invalidate subscriptions assigned to this node
+			for _, subID := range state.AssignedSubscriptions {
+				log.Printf("Control plane: Invalidating subscription %s from failed node %s", subID, nodeID)
+				delete(cp.subscriptionAssignments, subID)
+			}
 
 			// Reconstruct chain topology
 			cp.reconstructChain(nodeID)

@@ -248,6 +248,7 @@ func TestMultipleTopicSubscriptions(t *testing.T) {
 		TopicID   int64
 		Token     string
 		FromMsgID int64
+		NodeAddr  string
 	}, 0, len(topicIDs))
 
 	for _, topicID := range topicIDs {
@@ -264,10 +265,12 @@ func TestMultipleTopicSubscriptions(t *testing.T) {
 			TopicID   int64
 			Token     string
 			FromMsgID int64
+			NodeAddr  string
 		}{
 			TopicID:   topicID,
 			Token:     token,
 			FromMsgID: 0,
+			NodeAddr:  node.Address,
 		})
 
 		t.Logf("Topic %d: Token=%s (first 8 chars), Node=%s", topicID, token[:8], node.Address)
