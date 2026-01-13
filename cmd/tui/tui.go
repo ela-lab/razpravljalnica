@@ -667,6 +667,10 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 		return
 	}
 
+	if len(topicIDs) == 0 {
+		return
+	}
+
 	// cancel previous stream if any
 	if t.subCancel != nil {
 		t.subCancel()
@@ -675,14 +679,35 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 	ctx, cancel := context.WithCancel(ctx)
 	t.subCancel = cancel
 
-	token, _, err := t.service.GetSubscriptionNode(t.currentUser, topicIDs)
-	if err != nil {
-		t.showStatus(fmt.Sprintf("[red]Subscription error: %v[white]", err))
-		return
+	// Build subscriptions list - get token and node for each topic
+	subscriptions := make([]struct {
+		TopicID   int64
+		Token     string
+		FromMsgID int64
+		NodeAddr  string
+	}, len(topicIDs))
+
+	for i, topicID := range topicIDs {
+		token, node, err := t.service.GetSubscriptionNode(t.currentUser, topicID)
+		if err != nil {
+			t.showStatus(fmt.Sprintf("[red]Subscription error for topic %d: %v[white]", topicID, err))
+			return
+		}
+		subscriptions[i] = struct {
+			TopicID   int64
+			Token     string
+			FromMsgID int64
+			NodeAddr  string
+		}{
+			TopicID:   topicID,
+			Token:     token,
+			FromMsgID: 0,
+			NodeAddr:  node.Address,
+		}
 	}
 
 	go func() {
-		err := t.service.StreamSubscription(ctx, t.currentUser, topicIDs, token, 0, func(event *api.MessageEvent) error {
+		err := t.service.StreamMultipleSubscriptions(ctx, t.currentUser, subscriptions, func(event *api.MessageEvent) error {
 			// Resolve sender name if unknown
 			t.ensureUserName(event.Message.UserId)
 

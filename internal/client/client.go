@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/ela-lab/razpravljalnica/api"
@@ -160,14 +162,14 @@ func (cs *ClientService) GetMessages(topicID, fromMessageID int64, limit int32) 
 	return resp.Messages, nil
 }
 
-// GetSubscriptionNode gets a subscription token and node address
-func (cs *ClientService) GetSubscriptionNode(userID int64, topicIDs []int64) (string, *api.NodeInfo, error) {
+// GetSubscriptionNode gets a subscription token and node address for a single topic
+func (cs *ClientService) GetSubscriptionNode(userID int64, topicID int64) (string, *api.NodeInfo, error) {
 	ctx, cancel := cs.createContext()
 	defer cancel()
 
 	resp, err := cs.grpcClient.GetSubscriptionNode(ctx, &api.SubscriptionNodeRequest{
 		UserId:  userID,
-		TopicId: topicIDs,
+		TopicId: topicID,
 	})
 	if err != nil {
 		return "", nil, err
@@ -175,30 +177,201 @@ func (cs *ClientService) GetSubscriptionNode(userID int64, topicIDs []int64) (st
 	return resp.SubscribeToken, resp.Node, nil
 }
 
-// SubscribeToTopics subscribes to topic updates (returns a stream client)
-func (cs *ClientService) SubscribeToTopics(ctx context.Context, userID int64, topicIDs []int64, token string, fromMessageID int64) (api.MessageBoard_SubscribeTopicClient, error) {
+// GetSubscriptionNodesForTopics gets subscription tokens for multiple topics
+func (cs *ClientService) GetSubscriptionNodesForTopics(userID int64, topicIDs []int64) ([]string, *api.NodeInfo, error) {
+	tokens := make([]string, 0, len(topicIDs))
+	var nodeInfo *api.NodeInfo
+
+	for _, topicID := range topicIDs {
+		token, node, err := cs.GetSubscriptionNode(userID, topicID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get subscription for topic %d: %v", topicID, err)
+		}
+		tokens = append(tokens, token)
+		if nodeInfo == nil {
+			nodeInfo = node
+		}
+	}
+
+	return tokens, nodeInfo, nil
+}
+
+// SubscribeToTopic subscribes to a single topic (returns a stream client)
+func (cs *ClientService) SubscribeToTopic(ctx context.Context, userID int64, topicID int64, token string, fromMessageID int64) (api.MessageBoard_SubscribeTopicClient, error) {
 	return cs.grpcClient.SubscribeTopic(ctx, &api.SubscribeTopicRequest{
 		UserId:         userID,
-		TopicId:        topicIDs,
+		TopicId:        topicID,
 		SubscribeToken: token,
 		FromMessageId:  fromMessageID,
 	})
 }
 
-// StreamSubscription is a helper to stream events with a callback
-func (cs *ClientService) StreamSubscription(ctx context.Context, userID int64, topicIDs []int64, token string, fromMessageID int64, callback func(*api.MessageEvent) error) error {
-	stream, err := cs.SubscribeToTopics(ctx, userID, topicIDs, token, fromMessageID)
-	if err != nil {
-		return err
+// StreamMultipleSubscriptions streams events from multiple subscriptions concurrently
+func (cs *ClientService) StreamMultipleSubscriptions(ctx context.Context, userID int64, subscriptions []struct {
+	TopicID   int64
+	Token     string
+	FromMsgID int64
+	NodeAddr  string // Add node address to avoid regenerating tokens
+}, callback func(*api.MessageEvent) error) error {
+	// Create a channel to collect events from all subscriptions
+	eventChan := make(chan *api.MessageEvent, len(subscriptions)*100)
+	errChan := make(chan error, len(subscriptions))
+
+	// Start a goroutine for each subscription
+	for _, sub := range subscriptions {
+		go func(topicID int64, token string, fromMsgID int64, nodeAddr string) {
+			err := cs.StreamSubscriptionToNode(ctx, userID, topicID, token, fromMsgID, nodeAddr, func(event *api.MessageEvent) error {
+				select {
+				case eventChan <- event:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			})
+			if err != nil && err != io.EOF && err != context.Canceled {
+				errChan <- err
+			}
+		}(sub.TopicID, sub.Token, sub.FromMsgID, sub.NodeAddr)
 	}
 
+	// Collect and process events
+	activeStreams := len(subscriptions)
+	for activeStreams > 0 {
+		select {
+		case event := <-eventChan:
+			if event != nil {
+				if err := callback(event); err != nil {
+					return err
+				}
+			}
+		case err := <-errChan:
+			if err != nil {
+				return err
+			}
+			activeStreams--
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return nil
+}
+
+// StreamSubscriptionToNode streams from a subscription to a specific node
+// This is used when the token and node address are already known
+func (cs *ClientService) StreamSubscriptionToNode(ctx context.Context, userID int64, topicID int64, token string, fromMessageID int64, nodeAddr string, callback func(*api.MessageEvent) error) error {
+	maxRetries := 3
+	retryDelay := 2 * time.Second
+	lastSeenMessageID := fromMessageID
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("Reconnecting subscription for topic %d (attempt %d/%d)", topicID, attempt, maxRetries)
+			select {
+			case <-time.After(retryDelay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+
+			// Request new subscription node and token on reconnection
+			newToken, nodeInfo, err := cs.GetSubscriptionNode(userID, topicID)
+			if err != nil {
+				log.Printf("Failed to get new subscription node: %v", err)
+				if attempt == maxRetries {
+					return fmt.Errorf("failed to reconnect after %d attempts: %w", maxRetries, err)
+				}
+				continue
+			}
+			token = newToken
+			nodeAddr = nodeInfo.Address
+			log.Printf("Got new subscription token for topic %d on node %s", topicID, nodeAddr)
+		}
+
+		// Connect to the specific subscription node
+		nodeConn, err := grpc.NewClient(nodeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("Failed to connect to subscription node %s: %v", nodeAddr, err)
+			if attempt == maxRetries {
+				return fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, err)
+			}
+			continue
+		}
+
+		// Create a client for this specific node
+		nodeClient := api.NewMessageBoardClient(nodeConn)
+
+		// Subscribe to the topic on this node
+		stream, err := nodeClient.SubscribeTopic(ctx, &api.SubscribeTopicRequest{
+			UserId:         userID,
+			TopicId:        topicID,
+			SubscribeToken: token,
+			FromMessageId:  lastSeenMessageID,
+		})
+
+		if err != nil {
+			nodeConn.Close()
+			// If context was cancelled during subscribe, don't retry
+			if err == context.Canceled || ctx.Err() != nil {
+				return err
+			}
+			log.Printf("Failed to subscribe to topic %d: %v", topicID, err)
+			if attempt == maxRetries {
+				return fmt.Errorf("failed to subscribe after %d attempts: %w", maxRetries, err)
+			}
+			continue
+		}
+
+		// Stream events from this connection
+		streamErr := cs.receiveEvents(ctx, stream, &lastSeenMessageID, callback)
+
+		// Close the node connection
+		nodeConn.Close()
+
+		// If context was cancelled or EOF, don't retry
+		if streamErr == context.Canceled || ctx.Err() != nil || streamErr == io.EOF {
+			return streamErr
+		}
+
+		// If it's another error and we haven't exhausted retries, retry
+		if streamErr != nil {
+			log.Printf("Stream error for topic %d: %v", topicID, streamErr)
+			if attempt == maxRetries {
+				return fmt.Errorf("stream failed after %d attempts: %w", maxRetries, streamErr)
+			}
+			// Continue to retry
+			continue
+		}
+
+		// Stream ended normally
+		return nil
+	}
+
+	return fmt.Errorf("failed after %d retry attempts", maxRetries)
+}
+
+// StreamSubscription is a helper to stream events from a single subscription with a callback
+// It gets the subscription assignment and delegates to StreamSubscriptionToNode
+func (cs *ClientService) StreamSubscription(ctx context.Context, userID int64, topicID int64, token string, fromMessageID int64, callback func(*api.MessageEvent) error) error {
+	// Always get fresh subscription assignment
+	newToken, nodeInfo, err := cs.GetSubscriptionNode(userID, topicID)
+	if err != nil {
+		return fmt.Errorf("failed to get subscription node: %w", err)
+	}
+
+	return cs.StreamSubscriptionToNode(ctx, userID, topicID, newToken, fromMessageID, nodeInfo.Address, callback)
+}
+
+// receiveEvents receives events from a stream and tracks the last message ID
+func (cs *ClientService) receiveEvents(ctx context.Context, stream api.MessageBoard_SubscribeTopicClient, lastSeenMessageID *int64, callback func(*api.MessageEvent) error) error {
 	for {
 		event, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
 		if err != nil {
 			return err
+		}
+
+		// Track the last message ID we've seen for resume on reconnection
+		if event.Message != nil && event.Message.Id > *lastSeenMessageID {
+			*lastSeenMessageID = event.Message.Id
 		}
 
 		if err := callback(event); err != nil {

@@ -1,6 +1,6 @@
 # Razpravljalnica
 
-A distributed discussion board service implemented in Go using gRPC with chain replication and distributed subscriptions.
+A distributed discussion board service implemented in Go using gRPC with N-node chain replication, control plane coordination, and single-topic subscriptions with round-robin node assignment.
 
 ## Overview
 
@@ -10,24 +10,61 @@ Razpravljalnica is a discussion board that allows users to:
 - Post messages within topics
 - Like messages
 - Edit and delete their own messages
-- Subscribe to topics and receive real-time message updates
+- Subscribe to multiple topics and receive real-time message updates
+- Leverage distributed node replication for fault tolerance
 
-### Distributed Architecture
+## Architecture
 
-Razpravljalnica supports **chain replication** with distributed subscriptions:
+Razpravljalnica uses **chain replication** with a **control plane**:
 
-- **Chain Replication**: Write operations flow from head to tail; reads happen at tail; ensures consistency
-- **Distributed Subscriptions**: Subscription load is distributed across nodes using modulo-based hashing (`userID % nodeCount`)
-- **Control Plane**: Centralized coordination server manages node registry, health monitoring, and subscription responsibility assignment
-- **Backward Broadcasting**: Events are broadcast to subscribers as ACKs flow backward through the chain (after data is committed)
+### Core Design
+- **Chain Replication**: Write operations flow head → middle nodes → tail; ACKs flow backward (ensures strong consistency)
+- **Scalable Chain Length**: Supports any number of nodes (N ≥ 1); single-node deployment acts as both head and tail
+- **Control Plane Coordination**: Central coordinator manages node registry, health monitoring, and round-robin subscription assignment
+- **Backward Broadcasting**: Events broadcast to subscribers as ACKs flow backward through chain (after commit at tail)
 
-#### How Distributed Subscriptions Work
+### Control Plane
+- Tracks registered nodes via heartbeat
+- Maintains ordered node list for subscription assignment
+- Provides `AssignSubscriptionNode()` RPC for round-robin distribution
+- Uses atomic counters per-subscription for consistent ordering
+- Removes stale nodes if heartbeat fails
 
-1. **Registration**: Nodes register with control plane on startup, sending heartbeats every 3s
-2. **Responsibility Assignment**: Control plane maintains ordered node list and assigns each node a modulo index
-3. **Subscription Delegation**: Head calculates `userID % totalNodes` and directs clients to the responsible node
-4. **Filtered Broadcasting**: Each node only broadcasts events to users it's responsible for (matching `userID % totalNodes == myModuloIndex`)
-5. **Token Storage**: All nodes store all subscription tokens; filtering happens during broadcast
+### Node Topology
+- **Head Node** (`-id head -nextPort <next_port>`): Accepts writes, forwards to next node
+- **Middle Node(s)** (`-id middle_X -nextPort <next_port>`): Replicates from previous, forwards to next
+- **Tail Node** (`-id tail -nextPort 0`): Final authority, sends ACKs backward through chain
+
+### Subscription Mechanism
+- Client calls `GetSubscriptionNode(userID, topicID)`
+- Control plane assigns node via round-robin atomic counter
+- Token registered only on assigned node
+- Client connects to assigned node with token and subscribes
+
+### Message Flow
+```
+Write (e.g., PostMessage):
+  Head → Replicate → Middle(s) → Replicate → Tail
+  ↓                                            ↓
+  Store                                       ACK
+  ↑                                            ↓
+  Broadcast ACK ← Middle(s) ← ACK ← Tail
+
+Read/Subscribe:
+  Client → Designated Node (assigned by control plane)
+  ← Real-time MessageEvents
+```
+
+### Event Broadcasting
+- Replication: head → middle node(s) → tail through chain
+- Filtering: Only to subscribers with registered tokens on that node
+- Fallback: If control plane unavailable, broadcast uses existing token assignments
+
+### Fault Tolerance
+- **Detection**: Heartbeat monitoring removes failed nodes
+- **Auto-recovery**: Client auto-reconnects (3 retries, 2s delay), resumes from last message ID
+- **Reassignment**: Control plane caches assignments, reassigns if needed
+- **Transparent**: No user intervention; no data loss
 
 ## Project Structure
 
@@ -63,112 +100,129 @@ make build-cli
 make build-tui
 ```
 
+### Quick Cluster Startup (Example: 3-Node Chain + Control Plane)
+
+**Automated startup script** - starts example 3-node cluster and keeps it running:
+```bash
+./start-cluster.sh
+# Press Ctrl+C to stop all services
+```
+
+Services will be available on:
+- Control Plane: `localhost:5051`
+- Head Node: `localhost:9001`
+- Middle Node: `localhost:9002`
+- Tail Node: `localhost:9003`
+
 ### Running a Single Server (Non-Distributed)
 
 ```bash
 ./bin/razpravljalnica-server -p 9876
 ```
 
-### Running a Distributed Chain with Control Plane
+### Running a Distributed Chain with Control Plane (Manual)
 
 **Start control plane:**
 ```bash
-./bin/razpravljalnica-controlplane -p 8080
+./bin/razpravljalnica-controlplane -p 5051
 ```
 
-**Start 3-node chain:**
+**Example: Start 3-node chain (head, middle, tail):**
 ```bash
-# Node 1 (head)
-./bin/razpravljalnica-server -p 9001 -id node1 -next localhost:9002 --control-plane localhost:8080
+# Node 1 (head) - writes enter here
+./bin/razpravljalnica-server -p 9001 -id head -nextPort 9002 -control-plane localhost:5051
 
-# Node 2 (middle)
-./bin/razpravljalnica-server -p 9002 -id node2 -prev localhost:9001 -next localhost:9003 --control-plane localhost:8080
+# Node 2 (middle) - replicates from head
+./bin/razpravljalnica-server -p 9002 -id middle -nextPort 9003 -control-plane localhost:5051
 
-# Node 3 (tail)
-./bin/razpravljalnica-server -p 9003 -id node3 -prev localhost:9002 --control-plane localhost:8080
+# Node 3 (tail) - final authority, sends ACKs back
+./bin/razpravljalnica-server -p 9003 -id tail -nextPort 0 -control-plane localhost:5051
 ```
 
-**Connect clients to the head** for write operations:
-```bash
-./bin/razpravljalnica-cli -s localhost -p 9001 register --name "Alice"
-```
+**Note**: The chain supports any number of nodes. For N-node chains:
+- First node: `-id head -nextPort <next_port>` (no `-nextPort 0`)
+- Middle nodes: `-id middle_X -nextPort <next_port>`
+- Last node: `-id tail -nextPort 0`
+
+All nodes should specify `-control-plane localhost:5051` to connect to the coordinator.
 
 ### Running Clients
 
 **CLI Client:**
 ```bash
 # Show help
-./bin/razpravljalnica-cli -s localhost -p 9876 help
+./bin/razpravljalnica-cli -s localhost -p 9001 help
 
 # Register a user
-./bin/razpravljalnica-cli -s localhost -p 9876 register --name "Alice"
+./bin/razpravljalnica-cli -s localhost -p 9001 register --name "Alice"
 
 # Create a topic
-./bin/razpravljalnica-cli -s localhost -p 9876 create-topic --title "General Discussion"
+./bin/razpravljalnica-cli -s localhost -p 9001 create-topic --title "General Discussion"
 
 # Post a message
-./bin/razpravljalnica-cli -s localhost -p 9876 post-message --userId 1 --topicId 1 --message "Hello!"
+./bin/razpravljalnica-cli -s localhost -p 9001 post-message --userId 1 --topicId 1 --message "Hello!"
 
 # List topics
-./bin/razpravljalnica-cli -s localhost -p 9876 list-topics
+./bin/razpravljalnica-cli -s localhost -p 9001 list-topics
 
-# Subscribe to topics (real-time) - automatically routed to appropriate node
-./bin/razpravljalnica-cli -s localhost -p 9876 subscribe --userId 1 --topicIds 1
+# Subscribe to multiple topics (real-time streaming)
+./bin/razpravljalnica-cli -s localhost -p 9001 subscribe --userId 1 --topicIds 1,2,3
+
+# Get messages from a topic
+./bin/razpravljalnica-cli -s localhost -p 9001 get-messages --topicId 1 --limit 10
 ```
 
 **TUI Client (Terminal UI):**
 ```bash
-./bin/razpravljalnica-tui -s localhost -p 9876
+./bin/razpravljalnica-tui -s localhost -p 9001
 ```
+
+Inside the TUI:
+- `F2` - Login/Register
+- `F3` - Create new topic
+- `S` - Toggle subscription to selected topic
+- `Enter` - Like/unlike a message
+- `E` - Edit your own message
+- `Delete` - Delete your own message
+- `F1` - Help
+- `F12` - Exit
 
 ## Testing
 
 ```bash
 make test                # Run all tests
-make test-verbose        # Run with race detector
-make test-coverage       # Generate coverage report
 ```
 
-**Distributed subscription test:**
+### Test Scripts
+
+**Test CLI with control plane cluster:**
 ```bash
-cd tests
-go test -v -run TestDistributedSubscriptions
+./test-cli-subscriptions.sh
+# Automated test that:
+# - Starts control plane + 3-node cluster
+# - Creates a user and topics
+# - Posts messages
+# - Tests multi-topic subscription
+# - Verifies message reception
+# - Cleans up all processes
 ```
 
-## Implementation Details
+**Automated cluster startup:**
+```bash
+./start-cluster.sh
+# Keeps cluster running until Ctrl+C
+# Services available for manual testing
+```
 
-✅ Multi-user concurrent access  
-✅ Thread-safe in-memory storage  
-✅ Real-time subscriptions with streaming  
-✅ Chain replication (head writes, tail reads)
-✅ Distributed subscriptions with modulo-based load balancing
-✅ Control plane for cluster coordination
-✅ Backward event broadcasting (post-ACK)
-✅ Multiple client interfaces (CLI, TUI)
-✅ Comprehensive unit and integration tests
-✅ Clean modular architecture
+### Integration Tests
 
-## Architecture Highlights
+```bash
+# Run all integration tests
+go test -v ./tests
 
-### Control Plane
-- Tracks registered nodes via heartbeat (3s interval)
-- Maintains ordered node list for consistent modulo assignment
-- Provides `GetSubscriptionResponsibility` RPC to query node assignments
-- Removes stale nodes after 10s timeout
+# Test specific features
+go test -v -run TestMultipleTopicSubscriptions ./tests
+go test -v -run TestTokenNodeDistribution ./tests
+go test -v -run TestCLISubscriptions ./tests
+```
 
-### Node Registration
-- Nodes connect to control plane on startup with `--control-plane` flag
-- Register as head/tail based on chain position
-- Sync responsibility (myModuloIndex, totalNodes) every 3s
-
-### Subscription Assignment
-- Head's `GetSubscriptionNode` queries control plane for node list
-- Calculates `targetIndex = userID % totalNodes`
-- Returns node matching targetIndex to client
-- Client connects to designated node for streaming
-
-### Event Broadcasting
-- Replication: head → middle → tail (forward)
-- Broadcasting: tail ← middle ← head (backward, on ACK return)
-- Each node filters by `isResponsibleForUser(userID)` before sending
-- Fallback to broadcast-all if control plane unavailable
