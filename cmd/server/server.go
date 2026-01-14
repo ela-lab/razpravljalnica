@@ -471,7 +471,7 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessa
 		Likes:     int32(likeCount),
 	}
 
-	// Mark like as dirty
+	// Mark like as dirty for this user
 	s.dirtyBits.MarkLikeDirty(req.MessageId, req.UserId)
 
 	seq := atomic.AddInt64(&s.eventCounter, 1)
@@ -480,6 +480,7 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *api.LikeMessa
 		repReq := &api.ReplicationRequest{
 			Op:             api.OpType_OP_LIKE,
 			Message:        updatedMessage,
+			User:           &api.User{Id: req.UserId}, // carry liker ID separately
 			SequenceNumber: seq,
 		}
 
@@ -1074,11 +1075,15 @@ func (s *MessageBoardServer) applyOperationLocally(req *api.ReplicationRequest) 
 				return err
 			}
 		case api.OpType_OP_LIKE:
+			likerID := req.Message.UserId
+			if req.User != nil && req.User.Id != 0 {
+				likerID = req.User.Id
+			}
 			var liked bool
 			if err := s.likeStorage.ToggleLike(&api.Like{
 				TopicId:   req.Message.TopicId,
 				MessageId: req.Message.Id,
-				UserId:    req.Message.UserId,
+				UserId:    likerID,
 			}, &liked); err != nil {
 				return err
 			}
@@ -1133,12 +1138,16 @@ func (s *MessageBoardServer) SyncData(ctx context.Context, req *api.SyncDataRequ
 	// Get all likes (as OP_LIKE operations)
 	allLikes := s.likeStorage.GetAllLikes()
 	for msgID, userIDs := range allLikes {
-		// Find the message to get topic ID
-		var topicID int64
+		// Find the message to get topic ID and author
+		var (
+			topicID   int64
+			msgAuthor int64
+		)
 		for tid, messages := range allMessages {
 			for _, msg := range messages {
 				if msg.Id == msgID {
 					topicID = tid
+					msgAuthor = msg.UserId
 					break
 				}
 			}
@@ -1153,8 +1162,9 @@ func (s *MessageBoardServer) SyncData(ctx context.Context, req *api.SyncDataRequ
 				Message: &api.Message{
 					Id:      msgID,
 					TopicId: topicID,
-					UserId:  userID,
+					UserId:  msgAuthor,
 				},
+				User:           &api.User{Id: userID},
 				SequenceNumber: 0,
 			})
 		}
@@ -1168,19 +1178,8 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 	var ret struct{}
 	now := time.Now().Format("15:04:05.000") // HH:MM:SS.mmm
 
-	if req.User != nil {
-		if err := s.userStorage.CreateUser(req.User, &ret); err != nil {
-			return nil, status.Errorf(codes.Internal, "replicate create user failed: %v", err)
-		}
-		now = time.Now().Format("15:04:05.000")
-		log.Printf("[%s] [Node %s] Replicated CreateUser: %d", now, s.nodeID, req.User.Id)
-	} else if req.Topic != nil {
-		if err := s.topicStorage.CreateTopic(req.Topic, &ret); err != nil {
-			return nil, status.Errorf(codes.Internal, "replicate create topic failed: %v", err)
-		}
-		now := time.Now().Format("15:04:05.000")
-		log.Printf("[%s] [Node %s] Replicated CreateTopic: %d", now, s.nodeID, req.Topic.Id)
-	} else {
+	// Check for message operations first (req.User may be set to carry liker ID)
+	if req.Message != nil {
 		switch req.Op {
 		case api.OpType_OP_POST:
 			if err := s.messageStorage.CreateMessage(req.Message, &ret); err != nil {
@@ -1208,18 +1207,34 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 			log.Printf("[%s] [Node %s] Replicated DeleteMessage: %d", now, s.nodeID, req.Message.Id)
 
 		case api.OpType_OP_LIKE:
+			likerID := req.Message.UserId
+			if req.User != nil && req.User.Id != 0 {
+				likerID = req.User.Id
+			}
 			var liked bool
 			if err := s.likeStorage.ToggleLike(&api.Like{
 				TopicId:   req.Message.TopicId,
 				MessageId: req.Message.Id,
-				UserId:    req.Message.UserId,
+				UserId:    likerID,
 			}, &liked); err != nil {
 				return nil, status.Errorf(codes.Internal, "replicate like failed: %v", err)
 			}
-			s.dirtyBits.MarkLikeDirty(req.Message.Id, req.Message.UserId)
+			s.dirtyBits.MarkLikeDirty(req.Message.Id, likerID)
 			now := time.Now().Format("15:04:05.000")
-			log.Printf("[%s] [Node %s] Replicated LikeMessage: %d (User %d)", now, s.nodeID, req.Message.Id, req.Message.UserId)
+			log.Printf("[%s] [Node %s] Replicated LikeMessage: %d (User %d)", now, s.nodeID, req.Message.Id, likerID)
 		}
+	} else if req.User != nil {
+		if err := s.userStorage.CreateUser(req.User, &ret); err != nil {
+			return nil, status.Errorf(codes.Internal, "replicate create user failed: %v", err)
+		}
+		now = time.Now().Format("15:04:05.000")
+		log.Printf("[%s] [Node %s] Replicated CreateUser: %d", now, s.nodeID, req.User.Id)
+	} else if req.Topic != nil {
+		if err := s.topicStorage.CreateTopic(req.Topic, &ret); err != nil {
+			return nil, status.Errorf(codes.Internal, "replicate create topic failed: %v", err)
+		}
+		now := time.Now().Format("15:04:05.000")
+		log.Printf("[%s] [Node %s] Replicated CreateTopic: %d", now, s.nodeID, req.Topic.Id)
 	}
 
 	atomic.StoreInt64(&s.sequenceCounter, req.SequenceNumber)
@@ -1236,12 +1251,16 @@ func (s *MessageBoardServer) ReplicateOperation(ctx context.Context, req *api.Re
 		log.Printf("[%s] [Node %s] Received ack from next node: %d", now, s.nodeID, resp.AckSequenceNumber)
 
 		// Mark data as clean after ACK received
-		if req.User == nil && req.Topic == nil {
+		if req.Message != nil {
 			switch req.Op {
 			case api.OpType_OP_POST, api.OpType_OP_UPDATE, api.OpType_OP_DELETE:
 				s.dirtyBits.MarkMessageClean(req.Message.TopicId, req.Message.Id)
 			case api.OpType_OP_LIKE:
-				s.dirtyBits.MarkLikeClean(req.Message.Id, req.Message.UserId)
+				likerID := req.Message.UserId
+				if req.User != nil && req.User.Id != 0 {
+					likerID = req.User.Id
+				}
+				s.dirtyBits.MarkLikeClean(req.Message.Id, likerID)
 			}
 		}
 	} else {

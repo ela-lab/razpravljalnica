@@ -3,22 +3,31 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"sort"
 	"strconv"
 	"time"
-
-	"sort"
 
 	"github.com/ela-lab/razpravljalnica/api"
 	"github.com/ela-lab/razpravljalnica/internal/client"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 type TUIApp struct {
 	app         *tview.Application
-	service     *client.ClientService
+	headService *client.ClientService
+	tailService *client.ClientService
+	cpClient    api.ControlPlaneClient
+	cpConn      *grpc.ClientConn
+	cpURL       string
+	headAddr    string
+	tailAddr    string
 	currentUser int64
 	mainLayout  tview.Primitive
 
@@ -46,28 +55,185 @@ type TUIApp struct {
 	inDialog             bool               // True when a modal form is active
 }
 
-func RunTUI(url string) error {
-	fmt.Printf("Connecting to %s...\n", url)
+// fetchClusterAddresses returns head/tail addresses from control plane.
+func fetchClusterAddresses(cp api.ControlPlaneClient) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	service, err := client.NewClientService(url, 10*time.Second)
+	resp, err := cp.GetClusterState(ctx, &emptypb.Empty{})
 	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+		return "", "", err
 	}
-	defer service.Close()
+
+	var headAddr, tailAddr string
+	if resp.GetHead() != nil {
+		headAddr = resp.GetHead().GetAddress()
+	}
+	if resp.GetTail() != nil {
+		tailAddr = resp.GetTail().GetAddress()
+	}
+	return headAddr, tailAddr, nil
+}
+
+// updateServices reconnects head/tail clients if addresses change.
+func (t *TUIApp) updateServices(headAddr, tailAddr string) error {
+	if headAddr == "" {
+		return fmt.Errorf("head address is empty")
+	}
+	if tailAddr == "" {
+		tailAddr = headAddr
+	}
+	// No change and clients already exist
+	if headAddr == t.headAddr && tailAddr == t.tailAddr && t.headService != nil && t.tailService != nil {
+		return nil
+	}
+
+	// Create new clients first
+	newHead, err := client.NewClientService(headAddr, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to head %s: %w", headAddr, err)
+	}
+	newTail, err := client.NewClientService(tailAddr, 10*time.Second)
+	if err != nil {
+		newHead.Close()
+		return fmt.Errorf("failed to connect to tail %s: %w", tailAddr, err)
+	}
+
+	// Swap
+	oldHead := t.headService
+	oldTail := t.tailService
+	t.headService = newHead
+	t.tailService = newTail
+	t.headAddr = headAddr
+	t.tailAddr = tailAddr
+
+	if oldHead != nil {
+		_ = oldHead.Close()
+	}
+	if oldTail != nil && oldTail != oldHead {
+		_ = oldTail.Close()
+	}
+
+	return nil
+}
+
+// startClusterWatcher polls control plane for head/tail changes and reconnects automatically.
+func (t *TUIApp) startClusterWatcher() {
+	if t.cpClient == nil {
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			head, tail, err := fetchClusterAddresses(t.cpClient)
+			if err != nil {
+				log.Printf("control plane check failed: %v", err)
+				continue
+			}
+			if head == "" {
+				continue
+			}
+			if tail == "" {
+				tail = head
+			}
+			if head == t.headAddr && tail == t.tailAddr {
+				continue
+			}
+
+			hAddr := head
+			tAddr := tail
+			t.app.QueueUpdateDraw(func() {
+				if err := t.updateServices(hAddr, tAddr); err != nil {
+					t.showStatus(fmt.Sprintf("[red]Failed to switch head/tail: %v[white]", err))
+					return
+				}
+
+				t.userNames = make(map[int64]string) // reset cache to avoid stale lookups on new tail
+				t.showStatus(fmt.Sprintf("[yellow]Topology changed: head %s | tail %s[white]", hAddr, tAddr))
+				// Refresh UI data and restart streaming with new endpoints
+				_ = t.loadTopics()
+				if t.currentTopicID == 0 {
+					t.loadSubscriptionFeed()
+				} else {
+					t.loadMessages(t.currentTopicID)
+				}
+				t.restartSubscriptionForCurrentView()
+			})
+		}
+	}()
+}
+
+func RunTUI(headURL, tailURL, controlPlaneURL string) error {
+	// Connect to control plane first (best effort)
+	var cpConn *grpc.ClientConn
+	var cpClient api.ControlPlaneClient
+	if controlPlaneURL != "" {
+		fmt.Printf("Connecting to control plane %s...\n", controlPlaneURL)
+		conn, err := grpc.NewClient(controlPlaneURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err == nil {
+			cpConn = conn
+			cpClient = api.NewControlPlaneClient(conn)
+		} else {
+			fmt.Printf("Warning: failed to connect to control plane (%v). Using provided head/tail.\n", err)
+		}
+	}
+	// Discover head/tail via control plane if available
+	resolvedHead := headURL
+	resolvedTail := tailURL
+	if cpClient != nil {
+		h, t, err := fetchClusterAddresses(cpClient)
+		if err == nil {
+			if h != "" {
+				resolvedHead = h
+			}
+			if resolvedTail == "" && t != "" {
+				resolvedTail = t
+			}
+		}
+	}
+	if resolvedTail == "" {
+		resolvedTail = resolvedHead
+	}
+
+	fmt.Printf("Using head %s and tail %s\n", resolvedHead, resolvedTail)
+
+	headService, err := client.NewClientService(resolvedHead, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to head: %w", err)
+	}
+
+	tailService, err := client.NewClientService(resolvedTail, 10*time.Second)
+	if err != nil {
+		headService.Close()
+		return fmt.Errorf("failed to connect to tail: %w", err)
+	}
 
 	tui := &TUIApp{
 		app:              tview.NewApplication(),
-		service:          service,
+		headService:      headService,
+		tailService:      tailService,
+		cpClient:         cpClient,
+		cpConn:           cpConn,
+		cpURL:            controlPlaneURL,
+		headAddr:         resolvedHead,
+		tailAddr:         resolvedTail,
 		userNames:        make(map[int64]string),
 		subscribedTopics: make(map[int64]bool),
 		likedMessages:    make(map[int64]bool),
 		autoScroll:       true,
 	}
+	defer tui.closeServices()
 
 	// Create UI
 	if err := tui.createUI(); err != nil {
 		return err
 	}
+
+	// Start monitoring cluster topology to react to head/tail changes
+	tui.startClusterWatcher()
 
 	// Run application
 	if err := tui.app.Run(); err != nil {
@@ -261,10 +427,15 @@ func (t *TUIApp) handleGlobalKeys(event *tcell.EventKey) *tcell.EventKey {
 }
 
 func (t *TUIApp) loadTopics() error {
-	topics, err := t.service.ListTopics()
+	topics, err := t.tailService.ListTopics()
 	if err != nil {
 		return err
 	}
+
+	// Keep topics ordered by ID for stable UI
+	sort.Slice(topics, func(i, j int) bool {
+		return topics[i].Id < topics[j].Id
+	})
 
 	t.topics = topics
 	t.topicList.Clear()
@@ -344,7 +515,7 @@ const (
 )
 
 func (t *TUIApp) loadMessages(topicID int64) {
-	messages, err := t.service.GetMessages(topicID, 0, messageFetchLimit)
+	messages, err := t.tailService.GetMessages(topicID, 0, messageFetchLimit)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Error loading messages: %v[white]", err))
 		return
@@ -409,7 +580,7 @@ func (t *TUIApp) onMessageSend(key tcell.Key) {
 
 	// If editing a message, update it instead of posting a new one
 	if t.editingMessageID != 0 {
-		_, err := t.service.UpdateMessage(t.currentUser, t.currentTopicID, t.editingMessageID, text)
+		_, err := t.headService.UpdateMessage(t.currentUser, t.currentTopicID, t.editingMessageID, text)
 		if err != nil {
 			t.showStatus(fmt.Sprintf("[red]Failed to update message: %v[white]", err))
 		} else {
@@ -437,7 +608,7 @@ func (t *TUIApp) onMessageSend(key tcell.Key) {
 		return
 	}
 
-	_, err := t.service.PostMessage(t.currentUser, t.currentTopicID, text)
+	_, err := t.headService.PostMessage(t.currentUser, t.currentTopicID, text)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Error: %v[white]", err))
 		return
@@ -465,7 +636,7 @@ func (t *TUIApp) showLoginDialog() {
 			return
 		}
 
-		user, err := t.service.GetUser(id)
+		user, err := t.tailService.GetUser(id)
 		if err != nil {
 			form.SetTitle(fmt.Sprintf("[red]Login failed: %v[white]", err))
 			return
@@ -489,7 +660,7 @@ func (t *TUIApp) showLoginDialog() {
 			return
 		}
 
-		user, err := t.service.CreateUser(name)
+		user, err := t.headService.CreateUser(name)
 		if err != nil {
 			t.showStatus(fmt.Sprintf("[red]Register failed: %v[white]", err))
 			return
@@ -560,7 +731,7 @@ func (t *TUIApp) showNewTopicDialog() {
 			return
 		}
 
-		topic, err := t.service.CreateTopic(topicName)
+		topic, err := t.headService.CreateTopic(topicName)
 		if err != nil {
 			t.showStatus(fmt.Sprintf("[red]Error: %v[white]", err))
 			t.inDialog = false
@@ -688,7 +859,7 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 	}, len(topicIDs))
 
 	for i, topicID := range topicIDs {
-		token, node, err := t.service.GetSubscriptionNode(t.currentUser, topicID)
+		token, node, err := t.headService.GetSubscriptionNode(t.currentUser, topicID)
 		if err != nil {
 			t.showStatus(fmt.Sprintf("[red]Subscription error for topic %d: %v[white]", topicID, err))
 			return
@@ -707,7 +878,7 @@ func (t *TUIApp) startSubscription(ctx context.Context, topicIDs []int64) {
 	}
 
 	go func() {
-		err := t.service.StreamMultipleSubscriptions(ctx, t.currentUser, subscriptions, func(event *api.MessageEvent) error {
+		err := t.headService.StreamMultipleSubscriptions(ctx, t.currentUser, subscriptions, func(event *api.MessageEvent) error {
 			// Resolve sender name if unknown
 			t.ensureUserName(event.Message.UserId)
 
@@ -762,7 +933,7 @@ func (t *TUIApp) likeMessage() {
 	topicID := msg.TopicId
 
 	// Toggle like on the server (server will add/remove)
-	_, err := t.service.LikeMessage(t.currentUser, topicID, msg.Id)
+	_, err := t.headService.LikeMessage(t.currentUser, topicID, msg.Id)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Error liking message: %v[white]", err))
 		return
@@ -800,7 +971,7 @@ func (t *TUIApp) deleteMessage() {
 	}
 
 	topicID := msg.TopicId
-	err := t.service.DeleteMessage(t.currentUser, topicID, msg.Id)
+	err := t.headService.DeleteMessage(t.currentUser, topicID, msg.Id)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Error deleting message: %v[white]", err))
 		return
@@ -853,7 +1024,7 @@ func (t *TUIApp) loadSubscriptionFeed() {
 
 	var all []*feedEntry
 	for _, topicID := range subscribedIDs {
-		messages, err := t.service.GetMessages(topicID, 0, messageFetchLimit)
+		messages, err := t.tailService.GetMessages(topicID, 0, messageFetchLimit)
 		if err != nil {
 			continue
 		}
@@ -941,7 +1112,7 @@ func (t *TUIApp) syncSubscriptionsFromServer() {
 		return
 	}
 
-	subscribedIDs, err := t.service.ListSubscriptions(t.currentUser)
+	subscribedIDs, err := t.tailService.ListSubscriptions(t.currentUser)
 	if err != nil {
 		t.showStatus(fmt.Sprintf("[red]Failed to load subscriptions: %v[white]", err))
 		return
@@ -968,7 +1139,7 @@ func (t *TUIApp) ensureUserName(userID int64) string {
 		return name
 	}
 
-	user, err := t.service.GetUser(userID)
+	user, err := t.tailService.GetUser(userID)
 	if err == nil && user != nil {
 		t.userNames[userID] = user.Name
 		return user.Name
@@ -1015,6 +1186,19 @@ func (t *TUIApp) getWrapWidth() int {
 		wrapWidth = 20
 	}
 	return wrapWidth
+}
+
+// closeServices cleans up active gRPC connections.
+func (t *TUIApp) closeServices() {
+	if t.headService != nil {
+		_ = t.headService.Close()
+	}
+	if t.tailService != nil && t.tailService != t.headService {
+		_ = t.tailService.Close()
+	}
+	if t.cpConn != nil {
+		_ = t.cpConn.Close()
+	}
 }
 
 // wrapText performs a simple word wrap at the given width.
