@@ -1,6 +1,6 @@
 # Razpravljalnica
 
-A distributed discussion board service implemented in Go using gRPC with N-node chain replication, control plane coordination, and single-topic subscriptions with round-robin node assignment.
+A distributed discussion board service implemented in Go using gRPC with N-node chain replication, control plane coordination, distributed subscriptions with round-robin node assignment.
 
 ## Overview
 
@@ -11,7 +11,6 @@ Razpravljalnica is a discussion board that allows users to:
 - Like messages
 - Edit and delete their own messages
 - Subscribe to multiple topics and receive real-time message updates
-- Leverage distributed node replication for fault tolerance
 
 ## Architecture
 
@@ -19,21 +18,19 @@ Razpravljalnica uses **chain replication** with a **control plane**:
 
 ### Core Design
 - **Chain Replication**: Write operations flow head → middle nodes → tail; ACKs flow backward (ensures strong consistency)
-- **Scalable Chain Length**: Supports any number of nodes (N ≥ 1); single-node deployment acts as both head and tail
-- **Control Plane Coordination**: Central coordinator manages node registry, health monitoring, and round-robin subscription assignment
-- **Backward Broadcasting**: Events broadcast to subscribers as ACKs flow backward through chain (after commit at tail)
+- **Scalable Chain Length**: Supports any number of nodes (N ≥ 1)
+- **Control Plane Coordination**: The control plane takes care of node additions and failures and subscription assignments
 
 ### Control Plane
 - Tracks registered nodes via heartbeat
-- Maintains ordered node list for subscription assignment
-- Provides `AssignSubscriptionNode()` RPC for round-robin distribution
-- Uses atomic counters per-subscription for consistent ordering
 - Removes stale nodes if heartbeat fails
+- Maintains ordered node list for subscription assignment
+- Distributes subscriptions with a round-robin approach for optimal load balancing
 
 ### Node Topology
-- **Head Node** (`-id head -nextPort <next_port>`): Accepts writes, forwards to next node
-- **Middle Node(s)** (`-id middle_X -nextPort <next_port>`): Replicates from previous, forwards to next
-- **Tail Node** (`-id tail -nextPort 0`): Final authority, sends ACKs backward through chain
+- **Head Node**: Accepts writes, forwards to next node
+- **Middle Node(s)**: Replicates from previous, forwards to next, allows reading by subscriptions
+- **Tail Node**: All one-time reads (GetUser, ListTopics, ListSubscriptions, GetMessages) are served here; sends ACKs backward through chain
 
 ### Subscription Mechanism
 - Client calls `GetSubscriptionNode(userID, topicID)`
@@ -44,13 +41,15 @@ Razpravljalnica uses **chain replication** with a **control plane**:
 ### Message Flow
 ```
 Write (e.g., PostMessage):
-  Head → Replicate → Middle(s) → Replicate → Tail
-  ↓                                            ↓
-  Store                                       ACK
-  ↑                                            ↓
-  Broadcast ACK ← Middle(s) ← ACK ← Tail
+  Client → Head → Replicate → Middle(s) → Replicate → Tail
+  
+  ACKs flow back to confirm writes: Tail → Middle(s) → Head
 
-Read/Subscribe:
+Reads (one-time operations):
+  Client → Tail Node only
+  ← Consistent results (committed at tail)
+
+Subscribe (streaming events):
   Client → Designated Node (assigned by control plane)
   ← Real-time MessageEvents
 ```
@@ -132,17 +131,14 @@ Services will be available on:
 # Node 1 (head) - writes enter here
 ./bin/razpravljalnica-server -p 9001 -id head -nextPort 9002 -control-plane localhost:5051
 
-# Node 2 (middle) - replicates from head
+# Node 2 (middle) - replicates from head, reads are performed by subscriptions
 ./bin/razpravljalnica-server -p 9002 -id middle -nextPort 9003 -control-plane localhost:5051
 
-# Node 3 (tail) - final authority, sends ACKs back
-./bin/razpravljalnica-server -p 9003 -id tail -nextPort 0 -control-plane localhost:5051
+# Node 3 (tail) - sends write ACKs back, reads are performed here
+./bin/razpravljalnica-server -p 9003 -id tail -control-plane localhost:5051
 ```
 
-**Note**: The chain supports any number of nodes. For N-node chains:
-- First node: `-id head -nextPort <next_port>` (no `-nextPort 0`)
-- Middle nodes: `-id middle_X -nextPort <next_port>`
-- Last node: `-id tail -nextPort 0`
+**Note**: Any IDs can be used to distinguish the nodes. The tail node should be left with the `-nextPort` field blank.
 
 All nodes should specify `-control-plane localhost:5051` to connect to the coordinator.
 
@@ -162,15 +158,21 @@ All nodes should specify `-control-plane localhost:5051` to connect to the coord
 # Post a message
 ./bin/razpravljalnica-cli -s localhost -p 9001 post-message --userId 1 --topicId 1 --message "Hello!"
 
-# List topics
-./bin/razpravljalnica-cli -s localhost -p 9001 list-topics
+# List topics (tail-only)
+./bin/razpravljalnica-cli -s localhost -p 9003 list-topics
 
 # Subscribe to multiple topics (real-time streaming)
 ./bin/razpravljalnica-cli -s localhost -p 9001 subscribe --userId 1 --topicIds 1,2,3
 
-# Get messages from a topic
-./bin/razpravljalnica-cli -s localhost -p 9001 get-messages --topicId 1 --limit 10
+# Get messages from a topic (tail-only)
+./bin/razpravljalnica-cli -s localhost -p 9003 get-messages --topicId 1 --limit 10
 ```
+
+Note:
+- Writes (register user, create topic, post message) should be sent to the current head.
+- One-time reads (get messages, list topics, list subscriptions, get user) must be sent to the current tail.
+- Subscriptions connect to the node assigned by the control plane and stream events in real time.
+
 
 **TUI Client (Terminal UI):**
 ```bash
