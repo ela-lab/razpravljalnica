@@ -175,17 +175,29 @@ Note:
 
 
 **TUI Client (Terminal UI):**
+
+The TUI automatically discovers head/tail nodes from the control plane and adapts to topology changes:
+
 ```bash
-./bin/razpravljalnica-tui -s localhost -p 9001
+# Auto-discovery mode (recommended - monitors control plane for topology changes)
+./bin/razpravljalnica-tui -s localhost -p 9001 --control-plane-host localhost --control-plane-port 5051
+
+# Manual head/tail mode
+./bin/razpravljalnica-tui -s localhost -p 9001 --tail-host localhost --tail-port 9003
+
+# Standalone mode (single node, no control plane)
+./bin/razpravljalnica-tui -s localhost -p 9876
 ```
 
-Inside the TUI:
+Keyboard shortcuts:
 - `F2` - Login/Register
 - `F3` - Create new topic
 - `S` - Toggle subscription to selected topic
 - `Enter` - Like/unlike a message
 - `E` - Edit your own message
 - `Delete` - Delete your own message
+- `Tab` - Switch focus between panels
+- `ESC` - Return focus to topic list
 - `F1` - Help
 - `F12` - Exit
 
