@@ -1640,12 +1640,14 @@ func (x *GetClusterStateResponse) GetAllNodes() []*NodeInfo {
 }
 
 type RegisterNodeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Node          *NodeInfo              `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
-	IsHead        bool                   `protobuf:"varint,2,opt,name=is_head,json=isHead,proto3" json:"is_head,omitempty"` // True if this is the head node
-	IsTail        bool                   `protobuf:"varint,3,opt,name=is_tail,json=isTail,proto3" json:"is_tail,omitempty"` // True if this is the tail node
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Node               *NodeInfo              `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
+	IsHead             bool                   `protobuf:"varint,2,opt,name=is_head,json=isHead,proto3" json:"is_head,omitempty"`                                      // True if this is the head node
+	IsTail             bool                   `protobuf:"varint,3,opt,name=is_tail,json=isTail,proto3" json:"is_tail,omitempty"`                                      // True if this is the tail node
+	CurrentNextAddress string                 `protobuf:"bytes,4,opt,name=current_next_address,json=currentNextAddress,proto3" json:"current_next_address,omitempty"` // Node's current next address for drift detection
+	CurrentPrevAddress string                 `protobuf:"bytes,5,opt,name=current_prev_address,json=currentPrevAddress,proto3" json:"current_prev_address,omitempty"` // Node's current prev address for drift detection
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RegisterNodeRequest) Reset() {
@@ -1697,6 +1699,20 @@ func (x *RegisterNodeRequest) GetIsTail() bool {
 		return x.IsTail
 	}
 	return false
+}
+
+func (x *RegisterNodeRequest) GetCurrentNextAddress() string {
+	if x != nil {
+		return x.CurrentNextAddress
+	}
+	return ""
+}
+
+func (x *RegisterNodeRequest) GetCurrentPrevAddress() string {
+	if x != nil {
+		return x.CurrentPrevAddress
+	}
+	return ""
 }
 
 type SubscriptionResponsibilityResponse struct {
@@ -2059,11 +2075,13 @@ const file_api_razpravljalnica_proto_rawDesc = "" +
 	"\x17GetClusterStateResponse\x12-\n" +
 	"\x04head\x18\x01 \x01(\v2\x19.razpravljalnica.NodeInfoR\x04head\x12-\n" +
 	"\x04tail\x18\x02 \x01(\v2\x19.razpravljalnica.NodeInfoR\x04tail\x126\n" +
-	"\tall_nodes\x18\x03 \x03(\v2\x19.razpravljalnica.NodeInfoR\ballNodes\"v\n" +
+	"\tall_nodes\x18\x03 \x03(\v2\x19.razpravljalnica.NodeInfoR\ballNodes\"\xda\x01\n" +
 	"\x13RegisterNodeRequest\x12-\n" +
 	"\x04node\x18\x01 \x01(\v2\x19.razpravljalnica.NodeInfoR\x04node\x12\x17\n" +
 	"\ais_head\x18\x02 \x01(\bR\x06isHead\x12\x17\n" +
-	"\ais_tail\x18\x03 \x01(\bR\x06isTail\"u\n" +
+	"\ais_tail\x18\x03 \x01(\bR\x06isTail\x120\n" +
+	"\x14current_next_address\x18\x04 \x01(\tR\x12currentNextAddress\x120\n" +
+	"\x14current_prev_address\x18\x05 \x01(\tR\x12currentPrevAddress\"u\n" +
 	"\"SubscriptionResponsibilityResponse\x12O\n" +
 	"\vassignments\x18\x01 \x03(\v2-.razpravljalnica.NodeResponsibilityAssignmentR\vassignments\"\x91\x01\n" +
 	"\x1cNodeResponsibilityAssignment\x12-\n" +

@@ -14,12 +14,12 @@ func TestCLISubscriptions(t *testing.T) {
 	cluster := startTestClusterWithCP(t)
 	defer cluster.stop()
 
-	cliPath := "../bin/razpravljalnica-cli"
+	cliPath := ".../bin/razpravljalnica-cli"
 
 	// Parse the head address to extract port
-	parts := strings.Split(cluster.headAddr, ":")
+	parts := strings.Split(cluster.getHeadAddress(t), ":")
 	if len(parts) != 2 {
-		t.Fatalf("Invalid head address format: %s", cluster.headAddr)
+		t.Fatalf("Invalid head address format: %s", cluster.getHeadAddress(t))
 	}
 	headHost := parts[0]
 	headPort := parts[1]

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +43,26 @@ type NodeState struct {
 	IsHead                bool
 	IsTail                bool
 	AssignedSubscriptions []string // Track subscriptions assigned to this node
+	ExpectedNextAddress   string   // What control plane thinks this node's next should be
+	ExpectedPrevAddress   string   // What control plane thinks this node's prev should be
+}
+
+// chainString returns the current chain order as a readable string
+func (cp *ControlPlaneServer) chainString() string {
+	if len(cp.nodeOrder) == 0 {
+		return "[]"
+	}
+
+	parts := make([]string, 0, len(cp.nodeOrder))
+	for _, nodeID := range cp.nodeOrder {
+		if state, ok := cp.nodes[nodeID]; ok && state.Info != nil {
+			parts = append(parts, fmt.Sprintf("%s(%s)", nodeID, state.Info.Address))
+		} else {
+			parts = append(parts, nodeID)
+		}
+	}
+
+	return strings.Join(parts, " -> ")
 }
 
 // NewControlPlaneServer creates a new control plane server
@@ -75,7 +95,27 @@ func (cp *ControlPlaneServer) RegisterNode(ctx context.Context, req *api.Registe
 		}
 		cp.nodes[nodeID] = state
 		cp.lastNodeUpdate = time.Now()
-		log.Printf("Control plane: New node registered: %s (%s)", nodeID, req.Node.Address)
+		log.Printf("Control plane: Node registered: %s", nodeID)
+
+		// New node added - update topology with targeted notifications
+		cp.addNodeToTopology(nodeID)
+	} else {
+		// Existing node heartbeat - check for topology drift
+		// Only check nextAddress since servers don't track prevAddress
+		if state.ExpectedNextAddress != req.CurrentNextAddress {
+			log.Printf("Control plane: Topology drift detected for %s (expected next: %s, got: %s)",
+				nodeID, state.ExpectedNextAddress, req.CurrentNextAddress)
+
+			// Resend topology update asynchronously
+			go cp.notifyNodeTopologyChange(
+				nodeID,
+				state.Info.Address,
+				state.ExpectedNextAddress,
+				state.ExpectedPrevAddress,
+				state.IsHead,
+				state.IsTail,
+			)
+		}
 	}
 
 	state.LastHeartbeat = time.Now()
@@ -89,9 +129,6 @@ func (cp *ControlPlaneServer) RegisterNode(ctx context.Context, req *api.Registe
 	if req.IsTail {
 		cp.tailNodeID = nodeID
 	}
-
-	// Rebuild node order when topology changes
-	cp.rebuildNodeOrder()
 
 	return &emptypb.Empty{}, nil
 }
@@ -151,106 +188,126 @@ func (cp *ControlPlaneServer) GetSubscriptionResponsibility(ctx context.Context,
 	return resp, nil
 }
 
-// rebuildNodeOrder creates a consistent ordered list of nodes
-func (cp *ControlPlaneServer) rebuildNodeOrder() {
-	// Clear and rebuild
-	cp.nodeOrder = make([]string, 0, len(cp.nodes))
+// reconstructChainAndNotify rebuilds chain topology and notifies only affected nodes
+func (cp *ControlPlaneServer) reconstructChainAndNotify(removedNodeID string) {
+	log.Printf("Control plane: Reconstructing chain after %s removal", removedNodeID)
 
-	// Collect healthy node IDs
-	for nodeID := range cp.nodes {
-		cp.nodeOrder = append(cp.nodeOrder, nodeID)
+	// Remove the failed node from nodeOrder (maintain creation order)
+	newOrder := make([]string, 0, len(cp.nodeOrder)-1)
+	for _, nodeID := range cp.nodeOrder {
+		if nodeID != removedNodeID {
+			newOrder = append(newOrder, nodeID)
+		}
+	}
+	cp.nodeOrder = newOrder
+
+	if len(cp.nodeOrder) == 0 {
+		log.Printf("Control plane: No nodes left in chain")
+		cp.headNodeID = ""
+		cp.tailNodeID = ""
+		return
 	}
 
-	// Sort for consistency
-	sort.Strings(cp.nodeOrder)
+	// Notify all nodes of their new positions
+	for idx, nodeID := range cp.nodeOrder {
+		nodeState := cp.nodes[nodeID]
+		isHead := idx == 0
+		isTail := idx == len(cp.nodeOrder)-1
 
-	log.Printf("Control plane: Node order updated: %v (total: %d)", cp.nodeOrder, len(cp.nodeOrder))
+		var prevAddr, nextAddr string
+		if idx > 0 {
+			prevAddr = cp.nodes[cp.nodeOrder[idx-1]].Info.Address
+		}
+		if idx < len(cp.nodeOrder)-1 {
+			nextAddr = cp.nodes[cp.nodeOrder[idx+1]].Info.Address
+		}
+
+		// Check if node already had a prev address (was previously in the middle or was a tail)
+		// Only newly added nodes should trigger catchup (they had empty prev before)
+		oldPrevAddr := nodeState.ExpectedPrevAddress
+		shouldTriggerCatchup := prevAddr != "" && oldPrevAddr == ""
+
+		// Update expected state
+		nodeState.ExpectedNextAddress = nextAddr
+		nodeState.ExpectedPrevAddress = prevAddr
+
+		// Update head/tail tracking
+		if isHead {
+			cp.headNodeID = nodeID
+		}
+		if isTail {
+			cp.tailNodeID = nodeID
+		}
+
+		// Only send prevAddr if this node is newly getting a predecessor (newly added node)
+		// Nodes that already had a prev don't need to catchup again
+		prevAddrToSend := ""
+		if shouldTriggerCatchup {
+			prevAddrToSend = prevAddr
+		}
+
+		// Notify node of its new position
+		go cp.notifyNodeTopologyChange(nodeID, nodeState.Info.Address, nextAddr, prevAddrToSend, isHead, isTail)
+	}
+
+	log.Printf("Control plane: Chain reconstructed with %d nodes (head: %s, tail: %s)",
+		len(cp.nodeOrder), cp.headNodeID, cp.tailNodeID)
+	log.Printf("Control plane: Chain order: %s", cp.chainString())
 }
 
-// reconstructChain reconfigures chain topology after node failure
-func (cp *ControlPlaneServer) reconstructChain(failedNodeID string) {
-	log.Printf("Control plane: Reconstructing chain after %s failure", failedNodeID)
-
-	// Find failed node's position in chain
-	var predecessorID, successorID string
-
-	// Build chain order before removal
-	chainOrder := make([]string, 0, len(cp.nodeOrder))
-	for _, nodeID := range cp.nodeOrder {
-		if nodeID != failedNodeID {
-			chainOrder = append(chainOrder, nodeID)
-		}
+// addNodeToTopology inserts a new node and notifies only affected neighbors
+func (cp *ControlPlaneServer) addNodeToTopology(newNodeID string) {
+	// New node always becomes the tail (append to end)
+	oldTailID := ""
+	if len(cp.nodeOrder) > 0 {
+		oldTailID = cp.nodeOrder[len(cp.nodeOrder)-1]
 	}
 
-	if len(chainOrder) == 0 {
-		log.Printf("Control plane: No nodes left in chain after %s failure", failedNodeID)
-		return
+	cp.nodeOrder = append(cp.nodeOrder, newNodeID)
+
+	isHead := len(cp.nodeOrder) == 1
+	isTail := true // New node is always the tail
+
+	var prevNodeID, prevAddr string
+	if !isHead {
+		prevNodeID = oldTailID
+		prevAddr = cp.nodes[prevNodeID].Info.Address
 	}
 
-	// Find predecessor and successor
-	for i, nodeID := range cp.nodeOrder {
-		if nodeID == failedNodeID {
-			if i > 0 {
-				predecessorID = cp.nodeOrder[i-1]
-			}
-			if i < len(cp.nodeOrder)-1 {
-				successorID = cp.nodeOrder[i+1]
-			}
-			break
+	newNodeState := cp.nodes[newNodeID]
+	newNodeState.ExpectedNextAddress = "" // Tail has no next
+	newNodeState.ExpectedPrevAddress = prevAddr
+
+	// Update head/tail tracking
+	if isHead {
+		cp.headNodeID = newNodeID
+	}
+	cp.tailNodeID = newNodeID
+
+	// Notify the new tail node with prevAddr so it can catch up
+	go cp.notifyNodeTopologyChange(newNodeID, newNodeState.Info.Address, "", prevAddr, isHead, isTail)
+
+	// Notify old tail (now middle node) - its next changed to new node
+	if prevNodeID != "" {
+		oldTailState := cp.nodes[prevNodeID]
+		oldTailIsHead := len(cp.nodeOrder) == 2
+		oldTailIsTail := false // No longer tail
+
+		// Old tail's prev stays the same, just update its next
+		var oldTailPrevAddr string
+		if len(cp.nodeOrder) > 2 {
+			oldTailPrevAddr = cp.nodes[cp.nodeOrder[len(cp.nodeOrder)-3]].Info.Address
 		}
+		oldTailState.ExpectedPrevAddress = oldTailPrevAddr
+		oldTailState.ExpectedNextAddress = newNodeState.Info.Address
+
+		// Don't send prev in notification - old tail doesn't need to catch up
+		go cp.notifyNodeTopologyChange(prevNodeID, oldTailState.Info.Address, newNodeState.Info.Address, "", oldTailIsHead, oldTailIsTail)
 	}
 
-	log.Printf("Control plane: Chain reconstruction - failed: %s, predecessor: %s, successor: %s",
-		failedNodeID, predecessorID, successorID)
-
-	// Handle different failure scenarios
-	if predecessorID == "" && successorID == "" {
-		// Only node in chain - nothing to do
-		return
-	} else if predecessorID == "" {
-		// Head node failed - promote successor to head
-		if successorState, ok := cp.nodes[successorID]; ok {
-			cp.notifyNodeTopologyChange(successorID, successorState.Info.Address, "", "", true, false)
-			cp.headNodeID = successorID
-			log.Printf("Control plane: Promoted %s to head", successorID)
-		}
-	} else if successorID == "" {
-		// Tail node failed - promote predecessor to tail
-		if predecessorState, ok := cp.nodes[predecessorID]; ok {
-			cp.notifyNodeTopologyChange(predecessorID, predecessorState.Info.Address, "", "", false, true)
-			cp.tailNodeID = predecessorID
-			log.Printf("Control plane: Promoted %s to tail", predecessorID)
-		}
-	} else {
-		// Middle node failed - connect predecessor to successor
-		predecessorState, okPred := cp.nodes[predecessorID]
-		successorState, okSucc := cp.nodes[successorID]
-
-		if okPred && okSucc {
-			// Notify predecessor about new successor
-			cp.notifyNodeTopologyChange(
-				predecessorID,
-				predecessorState.Info.Address,
-				successorState.Info.Address,
-				"",
-				predecessorState.IsHead,
-				false,
-			)
-
-			// Notify successor about new predecessor (for sync)
-			cp.notifyNodeTopologyChange(
-				successorID,
-				successorState.Info.Address,
-				"",
-				predecessorState.Info.Address,
-				false,
-				successorState.IsTail,
-			)
-
-			log.Printf("Control plane: Connected %s -> %s (skipping failed %s)",
-				predecessorID, successorID, failedNodeID)
-		}
-	}
+	log.Printf("Control plane: Added node %s as new tail (position %d/%d, head: %v)",
+		newNodeID, len(cp.nodeOrder)-1, len(cp.nodeOrder)-1, isHead)
+	log.Printf("Control plane: Chain order: %s", cp.chainString())
 }
 
 // notifyNodeTopologyChange sends UpdateChainTopology RPC to a node
@@ -258,8 +315,6 @@ func (cp *ControlPlaneServer) notifyNodeTopologyChange(
 	nodeID, nodeAddress, newNext, newPrev string,
 	isHead, isTail bool,
 ) {
-	log.Printf("Control plane: Notifying %s of topology change (next: %s, prev: %s, head: %v, tail: %v)",
-		nodeID, newNext, newPrev, isHead, isTail)
 
 	// Connect to node
 	conn, err := grpc.NewClient(nodeAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -284,10 +339,7 @@ func (cp *ControlPlaneServer) notifyNodeTopologyChange(
 	_, err = client.UpdateChainTopology(ctx, req)
 	if err != nil {
 		log.Printf("Control plane: Failed to update topology on %s: %v", nodeID, err)
-		return
 	}
-
-	log.Printf("Control plane: Successfully updated topology on %s", nodeID)
 }
 
 // ReportNodeFailure allows nodes to report failures
@@ -298,13 +350,19 @@ func (cp *ControlPlaneServer) ReportNodeFailure(ctx context.Context, req *api.Re
 	log.Printf("Control plane: Node %s reports failure of %s", req.ReporterNodeId, req.FailedNodeId)
 
 	// Check if failed node exists
-	if _, exists := cp.nodes[req.FailedNodeId]; exists {
-		// Reconstruct chain
-		cp.reconstructChain(req.FailedNodeId)
+	state, exists := cp.nodes[req.FailedNodeId]
+	if exists {
+		// Invalidate subscriptions assigned to this node
+		for _, subID := range state.AssignedSubscriptions {
+			log.Printf("Control plane: Invalidating subscription %s from failed node %s", subID, req.FailedNodeId)
+			delete(cp.subscriptionAssignments, subID)
+		}
 
 		// Remove failed node
 		delete(cp.nodes, req.FailedNodeId)
-		cp.rebuildNodeOrder()
+
+		// Reconstruct chain and notify affected nodes
+		cp.reconstructChainAndNotify(req.FailedNodeId)
 	}
 
 	return &emptypb.Empty{}, nil
@@ -385,11 +443,9 @@ func (cp *ControlPlaneServer) healthCheckLoop() {
 				delete(cp.subscriptionAssignments, subID)
 			}
 
-			// Reconstruct chain topology
-			cp.reconstructChain(nodeID)
-
+			// Remove node first, then reconstruct
 			delete(cp.nodes, nodeID)
-			cp.rebuildNodeOrder()
+			cp.reconstructChainAndNotify(nodeID)
 		}
 
 		cp.mu.Unlock()
